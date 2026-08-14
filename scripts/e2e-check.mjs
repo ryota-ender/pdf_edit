@@ -44,10 +44,20 @@ page.on("pageerror", (error) => pageErrors.push(String(error)));
 // ---------------------------------------------------------------
 async function openFixture(name) {
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
-  await page.locator('input[type="file"]').first().setInputFiles(
-    path.join(FIXTURES, name),
-  );
-  await page.waitForSelector("svg[data-edit-layer]", { timeout: 30000 });
+  // ハイドレーション前に操作しても onChange が拾われないので、
+  // 落ち着くまで待ってから、それでも駄目なら投入し直す。
+  await page.waitForLoadState("networkidle").catch(() => {});
+
+  const input = page.locator('input[type="file"]').first();
+  for (let attempt = 0; ; attempt += 1) {
+    await input.setInputFiles(path.join(FIXTURES, name));
+    try {
+      await page.waitForSelector("svg[data-edit-layer]", { timeout: 20000 });
+      break;
+    } catch (error) {
+      if (attempt >= 2) throw error;
+    }
+  }
   // ページの初回レンダリング完了 (スピナー消滅) を待つ。
   await page.waitForFunction(
     () => !document.querySelector("main .animate-spin"),
@@ -465,6 +475,7 @@ check("IME変換確定の日本語が反映される", imeText === "日本語入
 // ---------------------------------------------------------------
 console.log("\n[7] エラーハンドリング");
 await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+await page.waitForLoadState("networkidle").catch(() => {});
 const notPdf = path.join(OUT, "not-a-pdf.txt");
 await fs.writeFile(notPdf, "this is not a pdf");
 await page.locator('input[type="file"]').first().setInputFiles(notPdf);
@@ -492,6 +503,7 @@ check(
 // ---------------------------------------------------------------
 console.log("\n[8] ドラッグ&ドロップ");
 await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+await page.waitForLoadState("networkidle").catch(() => {});
 const dropBytes = await fs.readFile(path.join(FIXTURES, "single-page.pdf"));
 await page.evaluate(async (base64) => {
   const raw = atob(base64);
