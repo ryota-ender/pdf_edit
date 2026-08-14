@@ -158,8 +158,10 @@ export function PdfEditor() {
       setSelectedId(id);
       setEditingId(id);
       setTool("select");
+      // 入力し終えるまでを 1 回の undo 単位にする。
+      history.beginTransaction();
     },
-    [activePageIndex, commit, font, pageView],
+    [activePageIndex, commit, font, history, pageView],
   );
 
   const handleDeleteElement = useCallback(
@@ -176,18 +178,29 @@ export function PdfEditor() {
 
   const handleFinishEdit = useCallback(
     (id: string, text: string) => {
-      setEditingId(null);
-      // 空文字のまま確定した要素は残さない。
+      // 別の要素の編集が既に始まっている場合は、そちらを閉じない。
+      setEditingId((previous) => (previous === id ? null : previous));
+
+      // 空のまま確定した要素は残さない。
       if (text.trim().length === 0) {
+        history.endTransaction();
         handleDeleteElement(id);
         return;
       }
-      // 入力中は updateTransient で反映済み。ここで履歴に 1 件だけ積む。
+
+      // 入力中の反映は updateTransient で済ませてある。最後の値を当ててから
+      // endTransaction することで、「編集前 → 編集後」が 1 件の履歴になる。
+      patchElement(id, { text }, true);
       history.endTransaction();
-      patchElement(id, { text }, false);
     },
     [handleDeleteElement, history, patchElement],
   );
+
+  /** 編集を打ち切る（ページ切り替えなど、入力欄の blur を伴わない経路用）。 */
+  const stopEditing = useCallback(() => {
+    setEditingId(null);
+    history.endTransaction();
+  }, [history]);
 
   // ---- ページの操作 ---------------------------------------------
   const handleRotatePage = useCallback(
@@ -297,7 +310,7 @@ export function PdfEditor() {
       }
       if (event.key === "Escape") {
         setSelectedId(null);
-        setEditingId(null);
+        stopEditing();
         return;
       }
       if (event.key === "v" || event.key === "V") setTool("select");
@@ -306,7 +319,7 @@ export function PdfEditor() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [pdf, redo, undo, selectedId, handleDeleteElement]);
+  }, [pdf, redo, undo, selectedId, handleDeleteElement, stopEditing]);
 
   const handleRenderError = useCallback((message: string) => {
     setBanner({ message, tone: "error" });
@@ -356,7 +369,7 @@ export function PdfEditor() {
         pageCount={pageCount}
         onPageChange={(index) => {
           setCurrentPage(clamp(index, 0, pageCount - 1));
-          setEditingId(null);
+          stopEditing();
         }}
       />
 
@@ -369,7 +382,7 @@ export function PdfEditor() {
           currentPage={activePageIndex}
           onSelectPage={(index) => {
             setCurrentPage(index);
-            setEditingId(null);
+            stopEditing();
           }}
           onRotatePage={handleRotatePage}
           onDeletePage={handleDeletePage}

@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# scripts/copy-pdfjs-assets.mjs が node_modules から複製する pdf.js の配布物
+/public/pdfjs/
+
+# 動作確認スクリプトの生成物
+/fixtures/
+/e2e-out/

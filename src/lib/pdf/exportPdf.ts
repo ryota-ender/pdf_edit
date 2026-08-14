@@ -60,19 +60,25 @@ async function buildPdf(
   }
 
   // --- ページ削除 -------------------------------------------------
-  // 生き残るページを元 PDF のページ番号で集め、それ以外を後ろから消す。
-  const survivingSourceIndexes = new Set(doc.pages.map((p) => p.sourceIndex));
-  for (let index = pdfDoc.getPageCount() - 1; index >= 0; index -= 1) {
-    if (!survivingSourceIndexes.has(index)) {
-      pdfDoc.removePage(index);
-    }
-  }
+  // 先に全ページの参照を取っておく。pdf-lib の removePage は内部の
+  // ページキャッシュを破棄しないため、削除後に getPages() を呼ぶと
+  // 消したはずのページを含む古い配列が返ってくる。
+  const allPages = pdfDoc.getPages();
 
-  const pages = pdfDoc.getPages();
-  if (pages.length !== doc.pages.length) {
+  const pages = doc.pages.map((page) => allPages[page.sourceIndex]);
+  if (pages.some((page) => page === undefined)) {
     throw new PdfEditorError(
       "ページ構成の解析に失敗したため書き出せませんでした。",
     );
+  }
+
+  // 残すページ以外をページツリーから外す。ここで取得済みの PDFPage は
+  // そのまま有効なので、描画対象としては引き続き使える。
+  const survivingSourceIndexes = new Set(doc.pages.map((p) => p.sourceIndex));
+  for (let index = allPages.length - 1; index >= 0; index -= 1) {
+    if (!survivingSourceIndexes.has(index)) {
+      pdfDoc.removePage(index);
+    }
   }
 
   // --- 回転を確定させる -------------------------------------------

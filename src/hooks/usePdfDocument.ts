@@ -22,7 +22,6 @@ export interface PdfDocumentState {
   isLoading: boolean;
   error: string | null;
   openFile: (file: File) => Promise<LoadedPdf | null>;
-  close: () => void;
   clearError: () => void;
 }
 
@@ -33,23 +32,18 @@ export function usePdfDocument(): PdfDocumentState {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // アンマウント時に pdf.js のワーカーを確実に片付けるため、最新の
-  // ドキュメントを ref にも持っておく。
-  const currentDocRef = useRef<PDFDocumentProxy | null>(null);
-  useEffect(() => {
-    currentDocRef.current = pdf?.doc ?? null;
-  }, [pdf]);
+  // 開いているドキュメントの破棄関数。差し替え時とアンマウント時に呼ぶ。
+  const destroyRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     return () => {
-      void currentDocRef.current?.destroy();
-      currentDocRef.current = null;
+      void destroyRef.current?.();
+      destroyRef.current = null;
     };
   }, []);
 
   const openFile = useCallback(async (file: File) => {
-    const isPdf =
-      file.type === PDF_MIME || /\.pdf$/i.test(file.name);
+    const isPdf = file.type === PDF_MIME || /\.pdf$/i.test(file.name);
     if (!isPdf) {
       setError(
         `「${file.name}」はPDFファイルではありません。拡張子が .pdf のファイルを選んでください。`,
@@ -64,32 +58,34 @@ export function usePdfDocument(): PdfDocumentState {
     setIsLoading(true);
     setError(null);
 
+    let opened: Awaited<ReturnType<typeof loadPdfDocument>> | null = null;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const doc = await loadPdfDocument(bytes);
+      opened = await loadPdfDocument(bytes);
 
-      if (doc.numPages === 0) {
-        await doc.destroy();
+      if (opened.doc.numPages === 0) {
         throw new PdfEditorError("このPDFにはページが含まれていません。");
       }
 
-      const { sizes, rotations } = await getPageSizes(doc);
+      const { sizes, rotations } = await getPageSizes(opened.doc);
       const loaded: LoadedPdf = {
-        doc,
+        doc: opened.doc,
         bytes,
         fileName: file.name,
         sizes,
         rotations,
       };
 
-      // 直前に開いていたドキュメントを破棄してから差し替える。
-      const previous = currentDocRef.current;
-      currentDocRef.current = doc;
+      // 新しいドキュメントに差し替えてから、直前のものを破棄する。
+      const previousDestroy = destroyRef.current;
+      destroyRef.current = opened.destroy;
       setPdf(loaded);
-      if (previous) void previous.destroy();
+      void previousDestroy?.();
 
       return loaded;
     } catch (cause) {
+      // 途中で失敗した分のワーカーを残さない。
+      if (opened) void opened.destroy();
       setError(toUserMessage(cause, "PDFの読み込みに失敗しました。"));
       return null;
     } finally {
@@ -97,15 +93,7 @@ export function usePdfDocument(): PdfDocumentState {
     }
   }, []);
 
-  const close = useCallback(() => {
-    const previous = currentDocRef.current;
-    currentDocRef.current = null;
-    setPdf(null);
-    setError(null);
-    if (previous) void previous.destroy();
-  }, []);
-
   const clearError = useCallback(() => setError(null), []);
 
-  return { pdf, isLoading, error, openFile, close, clearError };
+  return { pdf, isLoading, error, openFile, clearError };
 }

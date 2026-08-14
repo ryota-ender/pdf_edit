@@ -127,6 +127,9 @@ export function PdfPage({
     if (event.button !== 0) return;
 
     if (tool === "text") {
+      // 既定動作 (mousedown によるフォーカス移動) を止める。これを許すと、
+      // 直後に生成した入力欄からフォーカスが奪われて編集が即終了してしまう。
+      event.preventDefault();
       const point = toViewPoint(event);
       onAddText(
         clamp(point.x / viewWidth, 0, 1),
@@ -189,6 +192,7 @@ export function PdfPage({
 
   return (
     <div
+      data-pdf-page
       className="relative shadow-[0_1px_3px_rgba(15,23,42,0.12),0_8px_24px_rgba(15,23,42,0.10)]"
       style={{ width: widthPx, height: heightPx }}
     >
@@ -205,6 +209,7 @@ export function PdfPage({
 
       <svg
         ref={svgRef}
+        data-edit-layer
         viewBox={`0 0 ${viewWidth} ${viewHeight}`}
         preserveAspectRatio="none"
         className={`absolute inset-0 h-full w-full ${

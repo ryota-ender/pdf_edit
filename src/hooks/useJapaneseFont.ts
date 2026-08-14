@@ -18,7 +18,7 @@ export interface JapaneseFontState {
 export function useJapaneseFont(enabled: boolean): JapaneseFontState {
   const [font, setFont] = useState<LoadedFont | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const fallback = useMemo(createFallbackFont, []);
+  const fallback = useMemo(() => createFallbackFont(), []);
 
   useEffect(() => {
     if (!enabled || font) return;

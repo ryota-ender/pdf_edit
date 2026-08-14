@@ -5,13 +5,17 @@ import { useCallback, useMemo, useRef, useState } from "react";
 /**
  * Undo / Redo 付きの状態管理。
  *
- * ドラッグやスライダー操作は 1 回の操作で何十回も値が変わるため、
+ * ドラッグやキー入力は 1 操作で何十回も値が変わるため、
  * 「履歴に積む更新」と「積まない更新」を分けている。
  *
  *   commit(next)                 … 1 操作 = 1 履歴。追加・削除・数値入力など。
  *   beginTransaction() →
  *     updateTransient(next) × N →
- *   endTransaction()             … ドラッグや連続入力。開始時点の値を 1 件だけ積む。
+ *   endTransaction()             … ドラッグや文字入力。開始時点の値を 1 件だけ積む。
+ *
+ * 値は state と ref の両方に持つ。描画は state を使い、操作の途中で
+ * 「今の値」を読むところは ref を使う。beginTransaction が最新値を
+ * 同期的に読めないと、直後の endTransaction が誤った地点を履歴へ積むため。
  */
 export interface HistoryController<T> {
   state: T;
@@ -46,40 +50,50 @@ function resolve<T>(updater: T | ((current: T) => T), current: T): T {
 }
 
 export function useEditorHistory<T>(initial: T): HistoryController<T> {
-  const [history, setHistory] = useState<HistoryState<T>>({
+  // 描画には state を、操作の中での「今の値」の参照には ref を使う。
+  // 両者は write() で必ず同時に更新する。
+  const [state, setState] = useState<HistoryState<T>>({
     past: [],
     present: initial,
     future: [],
   });
+  const stateRef = useRef(state);
 
   // トランザクション開始時の値。endTransaction までここに退避しておく。
   const transactionBaseRef = useRef<T | null>(null);
 
-  const commit = useCallback((updater: T | ((current: T) => T)) => {
-    setHistory((current) => {
+  const write = useCallback((next: HistoryState<T>) => {
+    stateRef.current = next;
+    setState(next);
+  }, []);
+
+  const commit = useCallback(
+    (updater: T | ((current: T) => T)) => {
+      const current = stateRef.current;
       const next = resolve(updater, current.present);
-      if (Object.is(next, current.present)) return current;
-      return {
+      if (Object.is(next, current.present)) return;
+      write({
         past: [...current.past, current.present].slice(-HISTORY_LIMIT),
         present: next,
         future: [],
-      };
-    });
-  }, []);
+      });
+    },
+    [write],
+  );
 
-  const updateTransient = useCallback((updater: T | ((current: T) => T)) => {
-    setHistory((current) => {
+  const updateTransient = useCallback(
+    (updater: T | ((current: T) => T)) => {
+      const current = stateRef.current;
       const next = resolve(updater, current.present);
-      if (Object.is(next, current.present)) return current;
-      return { ...current, present: next };
-    });
-  }, []);
+      if (Object.is(next, current.present)) return;
+      write({ ...current, present: next });
+    },
+    [write],
+  );
 
   const beginTransaction = useCallback(() => {
-    setHistory((current) => {
-      transactionBaseRef.current = current.present;
-      return current;
-    });
+    // 入れ子で呼ばれても最初の地点を保つ。
+    transactionBaseRef.current ??= stateRef.current.present;
   }, []);
 
   const endTransaction = useCallback(() => {
@@ -87,50 +101,53 @@ export function useEditorHistory<T>(initial: T): HistoryController<T> {
     transactionBaseRef.current = null;
     if (base === null) return;
 
-    setHistory((current) => {
-      if (Object.is(base, current.present)) return current;
-      return {
-        past: [...current.past, base].slice(-HISTORY_LIMIT),
-        present: current.present,
-        future: [...current.future],
-      };
+    const current = stateRef.current;
+    if (Object.is(base, current.present)) return;
+    write({
+      past: [...current.past, base].slice(-HISTORY_LIMIT),
+      present: current.present,
+      future: [],
     });
-  }, []);
+  }, [write]);
 
   const undo = useCallback(() => {
-    setHistory((current) => {
-      const previous = current.past.at(-1);
-      if (previous === undefined) return current;
-      return {
-        past: current.past.slice(0, -1),
-        present: previous,
-        future: [current.present, ...current.future],
-      };
+    // 操作の途中で undo された場合は、その操作を無かったことにする。
+    transactionBaseRef.current = null;
+    const current = stateRef.current;
+    const previous = current.past.at(-1);
+    if (previous === undefined) return;
+    write({
+      past: current.past.slice(0, -1),
+      present: previous,
+      future: [current.present, ...current.future],
     });
-  }, []);
+  }, [write]);
 
   const redo = useCallback(() => {
-    setHistory((current) => {
-      const [next, ...rest] = current.future;
-      if (next === undefined) return current;
-      return {
-        past: [...current.past, current.present].slice(-HISTORY_LIMIT),
-        present: next,
-        future: rest,
-      };
-    });
-  }, []);
-
-  const reset = useCallback((next: T) => {
     transactionBaseRef.current = null;
-    setHistory({ past: [], present: next, future: [] });
-  }, []);
+    const current = stateRef.current;
+    const [next, ...rest] = current.future;
+    if (next === undefined) return;
+    write({
+      past: [...current.past, current.present].slice(-HISTORY_LIMIT),
+      present: next,
+      future: rest,
+    });
+  }, [write]);
+
+  const reset = useCallback(
+    (next: T) => {
+      transactionBaseRef.current = null;
+      write({ past: [], present: next, future: [] });
+    },
+    [write],
+  );
 
   return useMemo(
     () => ({
-      state: history.present,
-      canUndo: history.past.length > 0,
-      canRedo: history.future.length > 0,
+      state: state.present,
+      canUndo: state.past.length > 0,
+      canRedo: state.future.length > 0,
       commit,
       updateTransient,
       beginTransaction,
@@ -140,7 +157,7 @@ export function useEditorHistory<T>(initial: T): HistoryController<T> {
       reset,
     }),
     [
-      history,
+      state,
       commit,
       updateTransient,
       beginTransaction,
