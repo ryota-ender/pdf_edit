@@ -1,26 +1,69 @@
 @import "tailwindcss";
 
+/*
+ * PDF へ埋め込むのと同じ TTF をプレビューでも使う。
+ * 同一フォント・同一メトリクスで描くことで、画面上の文字位置と
+ * 書き出した PDF の文字位置が一致する。
+ * `local()` は指定しない。利用者の環境にある同名フォントが使われると
+ * 字形や字送りが変わってしまうため。
+ */
+@font-face {
+  font-family: "NotoSansJPEmbedded";
+  src: url("/fonts/NotoSansJP-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  /* 5MB あるので、読めるようになるまでは代替フォントで表示する。 */
+  font-display: swap;
+}
+
+@theme {
+  --color-canvas: #f1f3f5;
+  --font-pdf: "NotoSansJPEmbedded";
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  background: #ffffff;
+  color: #111827;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
+    "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数値入力のスピナーは邪魔なので消す。 */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* サイドバー等の細いスクロールバー。 */
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+.thin-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  border-radius: 9999px;
+}
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
 }
