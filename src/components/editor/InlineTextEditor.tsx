@@ -2,15 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FONT_FAMILY } from "@/lib/pdf/font";
-import { LINE_HEIGHT_FACTOR, sanitizeText, splitLines } from "@/lib/pdf/textLayout";
+import {
+  LINE_HEIGHT_FACTOR,
+  sanitizeText,
+  splitLines,
+} from "@/lib/pdf/textLayout";
 import type { LoadedFont } from "@/lib/pdf/font";
 import type { TextElement } from "@/types/editor";
 
 interface InlineTextEditorProps {
   element: TextElement;
-  viewWidth: number;
-  viewHeight: number;
-  /** 1 ポイントあたりの CSS ピクセル数 (ズーム込み)。 */
+  /** 回転適用後のページ寸法（PDFポイント）。 */
+  view: { width: number; height: number };
+  /** 1 PDFポイントあたりの CSS ピクセル数（ズーム込み）。 */
   cssPxPerPoint: number;
   font: LoadedFont;
   /** 入力途中の内容。履歴には積まない。 */
@@ -20,7 +24,7 @@ interface InlineTextEditorProps {
 }
 
 /**
- * その場でテキストを打ち込むための <textarea>。
+ * その場で文字を打ち込むための <textarea>。
  *
  * 表示は SVG が担当し、この textarea は入力・キャレット・IME だけを担う。
  * 編集中は SVG 側の文字を隠して二重表示を避けている。
@@ -30,8 +34,7 @@ interface InlineTextEditorProps {
  */
 export function InlineTextEditor({
   element,
-  viewWidth,
-  viewHeight,
+  view,
   cssPxPerPoint,
   font,
   onPreview,
@@ -40,7 +43,7 @@ export function InlineTextEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState(element.text);
   const isComposingRef = useRef(false);
-  // onFinish を二重に呼ばないための番人 (Escape → blur の順で発火するため)。
+  // onFinish を二重に呼ばないための番人（Escape → blur の順で発火するため）。
   const finishedRef = useRef(false);
 
   useEffect(() => {
@@ -57,17 +60,18 @@ export function InlineTextEditor({
   // SVG 側の 1 行目ベースライン位置に textarea の 1 行目を合わせる。
   // 行ボックス内のベースライン = ハーフレディング + アセント。
   const baselinePx =
-    (element.y * viewHeight + ascentRatio * element.fontSize) * cssPxPerPoint;
+    (element.y * view.height + ascentRatio * element.fontSize) * cssPxPerPoint;
   const halfLeading =
     (lineHeightPx - (ascentRatio + descentRatio) * fontSizePx) / 2;
   const top = baselinePx - (halfLeading + ascentRatio * fontSizePx);
-  const left = element.x * viewWidth * cssPxPerPoint;
+  const left = element.x * view.width * cssPxPerPoint;
 
   const lines = splitLines(draft);
-  const widthPx = lines.reduce(
-    (max, line) => Math.max(max, font.measureText(line, element.fontSize)),
-    0,
-  ) * cssPxPerPoint;
+  const widthPx =
+    lines.reduce(
+      (max, line) => Math.max(max, font.measureText(line, element.fontSize)),
+      0,
+    ) * cssPxPerPoint;
 
   const finish = (value: string) => {
     if (finishedRef.current) return;
@@ -94,6 +98,7 @@ export function InlineTextEditor({
         onPreview(sanitizeText(event.currentTarget.value));
       }}
       onBlur={(event) => finish(event.target.value)}
+      onPointerDown={(event) => event.stopPropagation()}
       onKeyDown={(event) => {
         // 変換確定の Enter / Escape を編集終了と取り違えない。
         if (isComposingRef.current || event.nativeEvent.isComposing) return;
@@ -119,8 +124,9 @@ export function InlineTextEditor({
         fontSize: fontSizePx,
         lineHeight: `${lineHeightPx}px`,
         color: element.color,
+        textAlign: element.align,
       }}
-      className="resize-none overflow-hidden rounded-[2px] border-0 bg-white/85 p-0 whitespace-pre outline-2 outline-blue-500"
+      className="resize-none overflow-hidden rounded-[2px] border-0 bg-white/85 p-0 whitespace-pre shadow-[0_0_0_2px_#2563eb] outline-none"
     />
   );
 }

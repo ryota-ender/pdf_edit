@@ -1,6 +1,17 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import {
+  ArrowIcon,
+  CircleIcon,
+  HighlightIcon,
+  ImageIcon,
+  LockIcon,
+  PenIcon,
+  SquareIcon,
+  TextIcon,
+  UploadIcon,
+} from "./Icons";
 
 interface DropZoneProps {
   onFile: (file: File) => void;
@@ -9,7 +20,17 @@ interface DropZoneProps {
   onDismissError: () => void;
 }
 
-/** PDF 未読み込み時の初期画面。ドラッグ&ドロップとファイル選択に対応する。 */
+const CAPABILITIES = [
+  { Icon: TextIcon, label: "テキスト" },
+  { Icon: HighlightIcon, label: "ハイライト" },
+  { Icon: PenIcon, label: "フリーハンド" },
+  { Icon: SquareIcon, label: "四角形" },
+  { Icon: CircleIcon, label: "円" },
+  { Icon: ArrowIcon, label: "矢印" },
+  { Icon: ImageIcon, label: "画像" },
+];
+
+/** PDF 未読み込み時の初期画面。 */
 export function DropZone({
   onFile,
   isLoading,
@@ -37,7 +58,7 @@ export function DropZone({
 
   return (
     <div className="flex flex-1 items-center justify-center bg-canvas p-6">
-      <div className="w-full max-w-2xl">
+      <div className="w-full max-w-xl">
         <div
           onDragEnter={(event) => {
             event.preventDefault();
@@ -54,28 +75,15 @@ export function DropZone({
             }
           }}
           onDrop={handleDrop}
-          className={`rounded-2xl border-2 border-dashed bg-white px-8 py-16 text-center shadow-sm transition-colors ${
+          className={`rounded-2xl border-2 border-dashed bg-white px-8 py-14 text-center shadow-sm transition-colors ${
             isDragging
               ? "border-blue-500 bg-blue-50/60"
               : "border-slate-300 hover:border-slate-400"
           }`}
         >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            className="mx-auto h-14 w-14 text-slate-300"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.5}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 16.5V4.5m0 0L7.5 9M12 4.5 16.5 9M3.75 15.75v2.25a2.25 2.25 0 0 0 2.25 2.25h12a2.25 2.25 0 0 0 2.25-2.25v-2.25"
-            />
-          </svg>
+          <UploadIcon className="mx-auto h-12 w-12 text-slate-300" />
 
-          <h2 className="mt-6 text-xl font-semibold text-slate-800">
+          <h2 className="mt-5 text-xl font-semibold text-slate-800">
             PDFをここにドロップ
           </h2>
           <p className="mt-2 text-sm text-slate-500">
@@ -90,7 +98,10 @@ export function DropZone({
           >
             {isLoading ? (
               <>
-                <Spinner />
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                />
                 読み込み中…
               </>
             ) : (
@@ -111,10 +122,28 @@ export function DropZone({
             }}
           />
 
-          <p className="mt-8 text-xs leading-relaxed text-slate-400">
-            PDFはサーバーへアップロードされません。すべての処理はお使いのブラウザ内で完結します。
-          </p>
+          <div className="mt-8 border-t border-slate-100 pt-6">
+            <p className="text-xs font-medium text-slate-400">
+              追加できる編集要素
+            </p>
+            <ul className="mt-3 flex flex-wrap justify-center gap-2">
+              {CAPABILITIES.map(({ Icon, label }) => (
+                <li
+                  key={label}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-600"
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
+
+        <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-slate-400">
+          <LockIcon className="h-3.5 w-3.5" />
+          PDFはサーバーへアップロードされません。すべての処理はブラウザ内で完結します。
+        </p>
 
         {error && (
           <div
@@ -134,14 +163,5 @@ export function DropZone({
         )}
       </div>
     </div>
-  );
-}
-
-function Spinner() {
-  return (
-    <span
-      aria-hidden="true"
-      className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
-    />
   );
 }
