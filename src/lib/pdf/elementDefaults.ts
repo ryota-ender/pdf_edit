@@ -5,36 +5,108 @@ import type {
   DrawToolId,
   EditorElement,
   EllipseElement,
+  FontWeight,
   HighlightElement,
   ImageElement,
   NormalizedRect,
   PenElement,
+  PenPoint,
   RectElement,
   TextElement,
 } from "@/types/editor";
 
-/** 新規要素の見た目の初期値。ツールバーの色選択と共有する。 */
+/**
+ * 新規要素の見た目の初期値。
+ * ここは「最後に使った設定」を覚える器でもある。要素を作るたびに
+ * 色や太さを選び直さなくて済むよう、インスペクタでの変更を書き戻す。
+ */
 export interface StyleDefaults {
   textColor: string;
   fontSize: number;
+  fontWeight: FontWeight;
+  italic: boolean;
   shapeStroke: string;
   shapeFill: string | null;
   strokeWidth: number;
+  radius: number;
   highlightColor: string;
+  highlightOpacity: number;
   penColor: string;
   penWidth: number;
+  arrowHead: boolean;
 }
 
 export const INITIAL_STYLE: StyleDefaults = {
   textColor: "#111827",
   fontSize: DEFAULT_FONT_SIZE,
+  fontWeight: "regular",
+  italic: false,
   shapeStroke: "#2563eb",
   shapeFill: null,
   strokeWidth: 2,
+  radius: 0,
   highlightColor: "#fde047",
+  highlightOpacity: 0.45,
   penColor: "#dc2626",
   penWidth: 3,
+  arrowHead: true,
 };
+
+/**
+ * 要素の変更内容から「次に作る要素の既定値」を更新する。
+ * 例えば赤で線を引いたら、次の線も赤で始まる。
+ */
+export function deriveStyle(
+  style: StyleDefaults,
+  element: EditorElement,
+): StyleDefaults {
+  switch (element.type) {
+    case "text":
+      return {
+        ...style,
+        textColor: element.color,
+        fontSize: element.fontSize,
+        fontWeight: element.fontWeight,
+        italic: element.italic,
+      };
+    case "rect":
+      return {
+        ...style,
+        shapeStroke: element.stroke ?? style.shapeStroke,
+        shapeFill: element.fill,
+        strokeWidth: element.strokeWidth,
+        radius: element.radius,
+      };
+    case "ellipse":
+      return {
+        ...style,
+        shapeStroke: element.stroke ?? style.shapeStroke,
+        shapeFill: element.fill,
+        strokeWidth: element.strokeWidth,
+      };
+    case "highlight":
+      return {
+        ...style,
+        highlightColor: element.color,
+        highlightOpacity: element.opacity,
+      };
+    case "arrow":
+      return {
+        ...style,
+        shapeStroke: element.color,
+        strokeWidth: element.strokeWidth,
+        arrowHead: element.head,
+      };
+    case "pen":
+      return {
+        ...style,
+        penColor: element.color,
+        penWidth: element.strokeWidth,
+      };
+    default:
+      return style;
+  }
+}
 
 export function createId(prefix: string): string {
   const random =
@@ -43,23 +115,38 @@ export function createId(prefix: string): string {
   return `${prefix}-${random}`;
 }
 
+/** すべての要素に共通する初期値。 */
+function base(pageIndex: number) {
+  return {
+    pageIndex,
+    opacity: 1,
+    rotation: 0,
+    locked: false,
+    groupId: null,
+  };
+}
+
 export function createTextElement(
   pageIndex: number,
   x: number,
   y: number,
   style: StyleDefaults,
+  overrides: Partial<TextElement> = {},
 ): TextElement {
   return {
     id: createId("text"),
     type: "text",
-    pageIndex,
+    ...base(pageIndex),
     x,
     y,
-    opacity: 1,
     text: DEFAULT_TEXT,
     fontSize: style.fontSize,
     color: style.textColor,
     align: "left",
+    fontWeight: style.fontWeight,
+    italic: style.italic,
+    width: null,
+    ...overrides,
   };
 }
 
@@ -71,10 +158,27 @@ export function createImageElement(
   return {
     id: createId("image"),
     type: "image",
-    pageIndex,
-    opacity: 1,
+    ...base(pageIndex),
     assetId,
     ...rect,
+  };
+}
+
+/** 既存テキストを覆い隠すための白い矩形。 */
+export function createWhiteoutElement(
+  pageIndex: number,
+  rect: NormalizedRect,
+  color: string,
+): RectElement {
+  return {
+    id: createId("rect"),
+    type: "rect",
+    ...base(pageIndex),
+    ...rect,
+    fill: color,
+    stroke: null,
+    strokeWidth: 0,
+    radius: 0,
   };
 }
 
@@ -89,14 +193,14 @@ export function createDrawElement(
   x: number,
   y: number,
   style: StyleDefaults,
+  firstPoint?: PenPoint,
 ): EditorElement {
   switch (tool) {
     case "rect":
       return {
         id: createId("rect"),
         type: "rect",
-        pageIndex,
-        opacity: 1,
+        ...base(pageIndex),
         x,
         y,
         w: 0,
@@ -104,15 +208,14 @@ export function createDrawElement(
         fill: style.shapeFill,
         stroke: style.shapeStroke,
         strokeWidth: style.strokeWidth,
-        radius: 0,
+        radius: style.radius,
       } satisfies RectElement;
 
     case "ellipse":
       return {
         id: createId("ellipse"),
         type: "ellipse",
-        pageIndex,
-        opacity: 1,
+        ...base(pageIndex),
         x,
         y,
         w: 0,
@@ -126,8 +229,8 @@ export function createDrawElement(
       return {
         id: createId("highlight"),
         type: "highlight",
-        pageIndex,
-        opacity: 0.45,
+        ...base(pageIndex),
+        opacity: style.highlightOpacity,
         x,
         y,
         w: 0,
@@ -139,26 +242,25 @@ export function createDrawElement(
       return {
         id: createId("arrow"),
         type: "arrow",
-        pageIndex,
-        opacity: 1,
+        ...base(pageIndex),
         x1: x,
         y1: y,
         x2: x,
         y2: y,
         color: style.shapeStroke,
         strokeWidth: style.strokeWidth,
-        head: true,
+        head: style.arrowHead,
       } satisfies ArrowElement;
 
     default:
       return {
         id: createId("pen"),
         type: "pen",
-        pageIndex,
-        opacity: 1,
-        points: [{ x, y }],
+        ...base(pageIndex),
+        points: [firstPoint ?? { x, y }],
         color: style.penColor,
         strokeWidth: style.penWidth,
+        pressure: false,
       } satisfies PenElement;
   }
 }
@@ -170,7 +272,7 @@ export function updateDrawElement(
   startY: number,
   currentX: number,
   currentY: number,
-  options: { constrain?: boolean } = {},
+  options: { constrain?: boolean; pressure?: number } = {},
 ): EditorElement {
   if (element.type === "pen") {
     const last = element.points.at(-1);
@@ -178,7 +280,13 @@ export function updateDrawElement(
     if (last && Math.hypot(currentX - last.x, currentY - last.y) < 0.002) {
       return element;
     }
-    return { ...element, points: [...element.points, { x: currentX, y: currentY }] };
+    const point: PenPoint = { x: currentX, y: currentY };
+    if (options.pressure !== undefined) point.p = options.pressure;
+    return {
+      ...element,
+      points: [...element.points, point],
+      pressure: element.pressure || options.pressure !== undefined,
+    };
   }
 
   if (element.type === "arrow") {
@@ -188,7 +296,8 @@ export function updateDrawElement(
       // Shift で水平・垂直・45度に吸着させる。
       const dx = currentX - startX;
       const dy = currentY - startY;
-      const angle = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+      const angle =
+        Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
       const length = Math.hypot(dx, dy);
       endX = startX + Math.cos(angle) * length;
       endY = startY + Math.sin(angle) * length;

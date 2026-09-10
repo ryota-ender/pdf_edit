@@ -19,6 +19,12 @@ import { useCallback, useMemo, useRef, useState } from "react";
  */
 export interface HistoryController<T> {
   state: T;
+  /**
+   * 再レンダリングを待たずに「今の値」を読む。
+   * 押す→動かす→離すが 1 タスク内で連続したときでも、
+   * 直前の更新を取りこぼさないために使う。
+   */
+  getState: () => T;
   canUndo: boolean;
   canRedo: boolean;
   /** 履歴に 1 件積んでから更新する。 */
@@ -143,9 +149,12 @@ export function useEditorHistory<T>(initial: T): HistoryController<T> {
     [write],
   );
 
+  const getState = useCallback(() => stateRef.current.present, []);
+
   return useMemo(
     () => ({
       state: state.present,
+      getState,
       canUndo: state.past.length > 0,
       canRedo: state.future.length > 0,
       commit,
@@ -158,6 +167,7 @@ export function useEditorHistory<T>(initial: T): HistoryController<T> {
     }),
     [
       state,
+      getState,
       commit,
       updateTransient,
       beginTransaction,

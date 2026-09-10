@@ -68,7 +68,26 @@ async function openFixture(name) {
   await page.waitForTimeout(300);
 }
 
-const pickTool = (label) => page.getByRole("button", { name: label, exact: true }).click();
+const pickTool = (label) =>
+  page.getByRole("button", { name: label, exact: true }).click();
+
+/** インスペクタのボタンを押す。 */
+const inspectorButton = (label) =>
+  page.getByRole("button", { name: label, exact: true });
+
+/** ページ上の要素の数（描画・当たり判定・選択枠を除いた実数）。 */
+const shapeCount = () =>
+  page.evaluate(() =>
+    document.querySelectorAll(
+      "[data-page-index] svg[data-edit-layer] > text," +
+        "[data-page-index] svg[data-edit-layer] > rect[fill]:not([fill='transparent'])," +
+        "[data-page-index] svg[data-edit-layer] > ellipse," +
+        "[data-page-index] svg[data-edit-layer] > path[stroke]," +
+        "[data-page-index] svg[data-edit-layer] > polygon," +
+        "[data-page-index] svg[data-edit-layer] > image," +
+        "[data-page-index] svg[data-edit-layer] > g",
+    ).length,
+  );
 
 /** 指定ページの編集レイヤー。 */
 const layer = (pageIndex = 0) =>
@@ -147,6 +166,11 @@ async function setProperty(label, value) {
 async function measurePreviewInk(pageIndex = 0) {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
+
+  // 画面下部の通知はページの上に重なるため、出たままだと計測を汚す。
+  // 出ていたら内容を控えて閉じる（エラーなら検査項目として記録する）。
+  await dismissBanner();
+
   const box = await layer(pageIndex).boundingBox();
   const viewport = page.viewportSize();
   if (
@@ -203,11 +227,13 @@ async function measureExportedInk(pdfPath, pageIndex = 0) {
       await pdfPage.render({ canvas, viewport, background: "#ffffff" }).promise;
 
       const text = await pdfPage.getTextContent();
+      const annotations = await pdfPage.getAnnotations();
       return {
         ink: globalThis.__findRedInk(ctx, canvas.width, canvas.height),
         nonWhite: globalThis.__countNonWhite(ctx, canvas.width, canvas.height),
         pageCount: doc.numPages,
         textItems: text.items.map((item) => item.str),
+        annotations: annotations.map((a) => a.subtype),
       };
     },
     { base64: bytes.toString("base64"), pageIndex },
@@ -269,6 +295,19 @@ async function installHarness() {
       return count;
     };
   });
+}
+
+/** 画面下部の通知を閉じる。エラーが出ていたら検査項目として記録する。 */
+async function dismissBanner() {
+  const close = page.getByRole("button", { name: "通知を閉じる" });
+  if ((await close.count()) === 0) return;
+
+  const text = (await page.locator('[role="alert"]').allTextContents()).join(" ");
+  if (text.trim().length > 0) {
+    check("計測中にエラー通知が出ていない", false, text.slice(0, 80));
+  }
+  await close.first().click();
+  await page.waitForTimeout(150);
 }
 
 /** インク検出の対象色を切り替える。 */
@@ -789,6 +828,651 @@ check(
   Boolean(brokenAlert && /PDF/.test(brokenAlert)),
   (brokenAlert ?? "").slice(0, 60),
 );
+
+
+// ---------------------------------------------------------------
+// 10) スタイルの引き継ぎ / 重なり順
+// ---------------------------------------------------------------
+console.log("\n[10] スタイルの引き継ぎ / 重なり順");
+await openFixture("single-page.pdf");
+
+await pickTool("四角形");
+await drawOn(0, [0.15, 0.15], [0.45, 0.3]);
+await page.getByRole("button", { name: `色を ${MARK_COLOR} にする` }).first().click();
+await page.waitForTimeout(250);
+
+// 2つ目の四角形が、直前に選んだ色で始まるか
+await pickTool("四角形");
+await drawOn(0, [0.5, 0.15], [0.8, 0.3]);
+await page.waitForTimeout(250);
+const secondStroke = await page.evaluate(() => {
+  const rects = [
+    ...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect"),
+  ].filter((node) => node.getAttribute("fill") === "none");
+  return rects.at(-1)?.getAttribute("stroke") ?? null;
+});
+check(
+  "最後に使った色が次の要素へ引き継がれる",
+  secondStroke === MARK_COLOR,
+  String(secondStroke),
+);
+
+// 重なり順
+const orderBefore = await page.evaluate(() =>
+  [...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect")]
+    .filter((n) => n.getAttribute("fill") === "none")
+    .map((n) => n.getAttribute("x")),
+);
+await inspectorButton("最背面へ").click();
+await page.waitForTimeout(250);
+const orderAfter = await page.evaluate(() =>
+  [...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect")]
+    .filter((n) => n.getAttribute("fill") === "none")
+    .map((n) => n.getAttribute("x")),
+);
+check(
+  "重なり順を変更できる",
+  orderBefore.join() !== orderAfter.join(),
+  `${orderBefore.join()} → ${orderAfter.join()}`,
+);
+
+// ---------------------------------------------------------------
+// 11) 要素の回転
+// ---------------------------------------------------------------
+console.log("\n[11] 要素の回転");
+await openFixture("single-page.pdf");
+await pickTool("四角形");
+await drawOn(0, [0.2, 0.2], [0.6, 0.35]);
+await page.getByRole("button", { name: `色を ${MARK_COLOR} にする` }).first().click();
+await setRange("回転", 30);
+await page.waitForTimeout(300);
+
+const rotationApplied = await page.evaluate(() => {
+  const g = [
+    ...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > g"),
+  ].find((node) => (node.getAttribute("transform") ?? "").startsWith("rotate("));
+  return g?.getAttribute("transform") ?? null;
+});
+check(
+  "プレビューで要素が回転する",
+  Boolean(rotationApplied && rotationApplied.includes("rotate(30")),
+  String(rotationApplied),
+);
+
+await fitPageForMeasurement();
+await installHarness();
+await setInkTarget("red");
+const rotPreview = await measurePreviewInk();
+const rotExport = await exportAndSave("rotated-element.pdf");
+await setInkTarget("red");
+const rotResult = await measureExportedInk(rotExport.target);
+if (rotPreview && rotResult.ink) {
+  const dx = Math.abs(rotPreview.x0 - rotResult.ink.x0);
+  const dy = Math.abs(rotPreview.y0 - rotResult.ink.y0);
+  const dw = Math.abs(
+    rotPreview.x1 - rotPreview.x0 - (rotResult.ink.x1 - rotResult.ink.x0),
+  );
+  check(
+    "回転した要素の位置が出力と一致する",
+    dx < 0.012 && dy < 0.012 && dw < 0.015,
+    `dx=${(dx * 100).toFixed(2)}% dy=${(dy * 100).toFixed(2)}% dW=${(dw * 100).toFixed(2)}%`,
+  );
+} else {
+  check("回転した要素の位置が出力と一致する", false, "ink未検出");
+}
+
+// ---------------------------------------------------------------
+// 12) 太字 / 斜体 / 折り返し
+// ---------------------------------------------------------------
+console.log("\n[12] 太字 / 斜体 / 折り返し");
+await openFixture("single-page.pdf");
+await addText("日本語のテキストです", 0, 0.15, 0.2);
+
+await inspectorButton("太字").click();
+await page.waitForTimeout(400);
+const boldFamily = await page.evaluate(
+  () =>
+    document
+      .querySelector("[data-page-index] svg[data-edit-layer] > text")
+      ?.getAttribute("font-family") ?? null,
+);
+check(
+  "太字にするとBoldフォントに切り替わる",
+  boldFamily === "NotoSansJPEmbeddedBold",
+  String(boldFamily),
+);
+
+await inspectorButton("斜体").click();
+await page.waitForTimeout(250);
+const italicApplied = await page.evaluate(() => {
+  const node = document.querySelector(
+    "[data-page-index] svg[data-edit-layer] > text",
+  );
+  return node ? node.style.transform : null;
+});
+check(
+  "斜体を適用できる",
+  Boolean(italicApplied && italicApplied.includes("skew")),
+  String(italicApplied),
+);
+
+// 折り返し（禁則処理つき）
+await inspectorButton("斜体").click();
+await inspectorButton("太字").click();
+await page.locator("#prop-text").fill("これは折り返しの確認用の、長い日本語の文章です。句読点が行頭に来ないことも確かめます。");
+await page.locator("#prop-text").blur();
+await page.waitForTimeout(300);
+await inspectorButton("折り返しを有効にする").click();
+await page.waitForTimeout(400);
+
+const wrapped = await page.evaluate(() =>
+  [
+    ...document.querySelectorAll(
+      "[data-page-index] svg[data-edit-layer] > text tspan",
+    ),
+  ].map((node) => node.textContent ?? ""),
+);
+check("テキストが自動で折り返される", wrapped.length > 1, `${wrapped.length}行`);
+check(
+  "行頭に句読点が来ない（禁則処理）",
+  wrapped.slice(1).every((line) => !"、。".includes(line[0] ?? "")),
+  wrapped.map((l) => l.slice(0, 8)).join(" / "),
+);
+
+await waitForFont();
+const wrapExport = await exportAndSave("wrapped.pdf");
+await installHarness();
+const wrapResult = await measureExportedInk(wrapExport.target);
+check(
+  "折り返した文章が出力PDFにも入る",
+  wrapResult.textItems.join("").includes("句読点が行頭に来ない"),
+  wrapResult.textItems.join("").slice(0, 40),
+);
+
+// ---------------------------------------------------------------
+// 13) 整列 / グループ / ロック
+// ---------------------------------------------------------------
+console.log("\n[13] 整列 / グループ / ロック");
+await openFixture("single-page.pdf");
+for (const [i, spec] of [
+  [0.1, 0.15, 0.3, 0.25],
+  [0.4, 0.3, 0.6, 0.42],
+  [0.7, 0.5, 0.9, 0.6],
+].entries()) {
+  await pickTool("四角形");
+  await drawOn(0, [spec[0], spec[1]], [spec[2], spec[3]]);
+  void i;
+}
+await pickTool("選択");
+await page.keyboard.press("ControlOrMeta+a");
+await page.waitForTimeout(250);
+
+await inspectorButton("上揃え").click();
+await page.waitForTimeout(300);
+const tops = await page.evaluate(() =>
+  [...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect")]
+    .filter((n) => n.getAttribute("fill") === "none")
+    .map((n) => Number(n.getAttribute("y"))),
+);
+check(
+  "上揃えできる",
+  tops.length >= 3 && Math.max(...tops) - Math.min(...tops) < 1,
+  tops.map((t) => t.toFixed(1)).join(", "),
+);
+
+await inspectorButton("左右に等間隔").click();
+await page.waitForTimeout(300);
+const gaps = await page.evaluate(() => {
+  const rects = [
+    ...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect"),
+  ]
+    .filter((n) => n.getAttribute("fill") === "none")
+    .map((n) => ({
+      x: Number(n.getAttribute("x")),
+      w: Number(n.getAttribute("width")),
+    }))
+    .sort((a, b) => a.x - b.x);
+  return rects.slice(1).map((r, i) => r.x - (rects[i].x + rects[i].w));
+});
+check(
+  "等間隔に配置できる",
+  gaps.length >= 2 && Math.abs(gaps[0] - gaps[1]) < 1,
+  gaps.map((g) => g.toFixed(1)).join(", "),
+);
+
+// グループ化
+await page.keyboard.press("ControlOrMeta+g");
+await page.waitForTimeout(250);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
+const groupPoint = await pointOn(0, 0.2, 0.2);
+await page.mouse.click(groupPoint.x, groupPoint.y);
+await page.waitForTimeout(250);
+const groupSelectionLabel = await page
+  .locator("aside")
+  .last()
+  .locator("span")
+  .first()
+  .textContent();
+check(
+  "グループはまとめて選択される",
+  Boolean(groupSelectionLabel && groupSelectionLabel.includes("3 個")),
+  String(groupSelectionLabel),
+);
+
+// ロック
+await inspectorButton("ロック").click();
+await page.waitForTimeout(250);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
+await page.mouse.click(groupPoint.x, groupPoint.y);
+await page.waitForTimeout(250);
+const afterLockLabel = await page
+  .locator("aside")
+  .last()
+  .locator("span")
+  .first()
+  .textContent();
+check(
+  "ロックした要素は選択できない",
+  afterLockLabel === "プロパティ",
+  String(afterLockLabel),
+);
+
+// ---------------------------------------------------------------
+// 14) スナップ
+// ---------------------------------------------------------------
+console.log("\n[14] スナップ");
+await openFixture("single-page.pdf");
+await pickTool("四角形");
+await drawOn(0, [0.2, 0.2], [0.5, 0.3]);
+await pickTool("四角形");
+await drawOn(0, [0.2, 0.5], [0.5, 0.6]);
+await pickTool("選択");
+
+// 2つ目を1つ目の左端付近まで動かすと吸着するはず
+const grabPoint = await pointOn(0, 0.35, 0.55);
+const nearAlign = await pointOn(0, 0.353, 0.7);
+await page.mouse.move(grabPoint.x, grabPoint.y);
+await page.mouse.down();
+await page.mouse.move(nearAlign.x, nearAlign.y, { steps: 10 });
+await page.waitForTimeout(200);
+const guideVisible = await page.evaluate(
+  () =>
+    document.querySelectorAll(
+      "[data-page-index] svg[data-edit-layer] line[stroke='#ec4899']",
+    ).length,
+);
+await page.mouse.up();
+await page.waitForTimeout(250);
+
+const xs = await page.evaluate(() =>
+  [...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect")]
+    .filter((n) => n.getAttribute("fill") === "none")
+    .map((n) => Number(n.getAttribute("x"))),
+);
+check("スナップの目安線が出る", guideVisible > 0, `${guideVisible}本`);
+check(
+  "他の要素の端に吸着する",
+  xs.length >= 2 && Math.abs(xs[0] - xs[1]) < 0.5,
+  xs.map((x) => x.toFixed(2)).join(", "),
+);
+
+// ---------------------------------------------------------------
+// 15) 既存テキストの選択と書き換え / ハイライトの行吸着
+// ---------------------------------------------------------------
+console.log("\n[15] 既存テキストの扱い");
+await openFixture("japanese.pdf");
+
+// ハイライトが文字の行に吸着するか
+// わざと文字より縦に大きい範囲をなぞり、行の高さへ縮むかを見る。
+await pickTool("ハイライト");
+await drawOn(0, [0.05, 0.06], [0.55, 0.16]);
+await page.waitForTimeout(1200);
+const snapped = await page.evaluate(() =>
+  [
+    ...document.querySelectorAll("[data-page-index] svg[data-edit-layer] > rect"),
+  ]
+    .filter((n) => n.style.mixBlendMode === "multiply")
+    .map((n) => ({
+      y: Number(n.getAttribute("y")),
+      h: Number(n.getAttribute("height")),
+      w: Number(n.getAttribute("width")),
+    })),
+);
+const drawnHeight = 0.1 * 841.89; // なぞった範囲の高さ (ポイント)
+check(
+  "ハイライトが文字の行の高さに吸着する",
+  snapped.length >= 1 && snapped[0].h < drawnHeight * 0.7,
+  snapped.map((s) => `h=${s.h.toFixed(0)}`).join(", ") + ` (なぞった高さ ${drawnHeight.toFixed(0)})`,
+);
+
+// 既存テキストの書き換え
+await openFixture("japanese.pdf");
+await pickTool("既存テキストを編集");
+await drawOn(0, [0.08, 0.075], [0.5, 0.115]);
+await page.waitForTimeout(1200);
+
+const editorOpen = await page.locator("textarea:focus").count();
+const extracted = await page.evaluate(
+  () => document.querySelector("textarea")?.value ?? "",
+);
+check(
+  "既存テキストをなぞると内容が取り込まれる",
+  editorOpen > 0 && extracted.includes("研究計画書"),
+  extracted.slice(0, 20),
+);
+
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("事業計画書");
+await page.keyboard.press("ControlOrMeta+Enter");
+await page.waitForTimeout(400);
+await waitForFont();
+
+const rewriteExport = await exportAndSave("text-rewrite.pdf");
+await installHarness();
+const rewriteResult = await measureExportedInk(rewriteExport.target);
+check(
+  "書き換えた文字が出力に入る",
+  rewriteResult.textItems.join("").includes("事業計画書"),
+  rewriteResult.textItems.join("").slice(0, 40),
+);
+
+// ---------------------------------------------------------------
+// 16) 検索
+// ---------------------------------------------------------------
+console.log("\n[16] 検索");
+await openFixture("japanese.pdf");
+await page.keyboard.press("ControlOrMeta+f");
+await page.waitForTimeout(300);
+await page.getByRole("textbox", { name: "文書内を検索" }).fill("システム");
+await page.waitForTimeout(1500);
+const searchHits = await page.evaluate(
+  () =>
+    document.querySelectorAll(
+      "[data-page-index] svg[data-edit-layer] rect[fill='#facc15']",
+    ).length,
+);
+check("検索でヒット箇所が光る", searchHits > 0, `${searchHits}箇所`);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
+
+// ---------------------------------------------------------------
+// 17) PDF注釈として書き出す
+// ---------------------------------------------------------------
+console.log("\n[17] PDF注釈モード");
+await openFixture("single-page.pdf");
+await pickTool("四角形");
+await drawOn(0, [0.2, 0.2], [0.6, 0.4]);
+await page.getByRole("button", { name: `色を ${MARK_COLOR} にする` }).first().click();
+await page.waitForTimeout(250);
+await page.getByLabel("書き出し方").selectOption("annotate");
+await page.waitForTimeout(200);
+
+await fitPageForMeasurement();
+await installHarness();
+await setInkTarget("red");
+const annotPreview = await measurePreviewInk();
+const annotExport = await exportAndSave("annotated.pdf");
+await setInkTarget("red");
+const annotResult = await measureExportedInk(annotExport.target);
+
+check(
+  "PDF注釈オブジェクトとして書き出される",
+  annotResult.annotations.includes("Square"),
+  annotResult.annotations.join(", ") || "注釈なし",
+);
+check("注釈にも外観が付いていて描画される", annotResult.ink !== null);
+if (annotPreview && annotResult.ink) {
+  const dx = Math.abs(annotPreview.x0 - annotResult.ink.x0);
+  const dy = Math.abs(annotPreview.y0 - annotResult.ink.y0);
+  check(
+    "注釈モードでも位置が一致する",
+    dx < 0.012 && dy < 0.012,
+    `dx=${(dx * 100).toFixed(2)}% dy=${(dy * 100).toFixed(2)}%`,
+  );
+}
+
+// ---------------------------------------------------------------
+// 18) PDF結合 / ページ抽出
+// ---------------------------------------------------------------
+console.log("\n[18] 結合 / 抽出");
+await openFixture("single-page.pdf");
+await page
+  .locator('input[aria-label="結合するPDF"]')
+  .setInputFiles(path.join(FIXTURES, "multi-page.pdf"));
+await page.waitForTimeout(2000);
+const mergedPages = await page.locator("[data-pdf-page]").count();
+check("別のPDFを結合できる", mergedPages === 4, `${mergedPages}ページ`);
+
+const mergedExport = await exportAndSave("merged.pdf");
+await installHarness();
+const mergedResult = await measureExportedInk(mergedExport.target, 0);
+check(
+  "結合結果が出力PDFに反映される",
+  mergedResult.pageCount === 4,
+  `${mergedResult.pageCount}ページ`,
+);
+const mergedTexts = [];
+for (let i = 0; i < mergedResult.pageCount; i += 1) {
+  mergedTexts.push((await measureExportedInk(mergedExport.target, i)).textItems.join(""));
+}
+check(
+  "結合後もそれぞれの内容が残る",
+  mergedTexts[0].includes("Single Page Fixture") && mergedTexts[1].includes("Page 1"),
+  mergedTexts.map((t) => t.slice(0, 12)).join(" / "),
+);
+
+// ページ抽出（インスペクタの「このページを抽出」を使う）
+await page.getByRole("button", { name: "3ページ目を表示" }).click();
+await page.waitForTimeout(900);
+const [extractDownload] = await Promise.all([
+  page.waitForEvent("download", { timeout: 60000 }),
+  page.getByRole("button", { name: "ページ抽出" }).click(),
+]);
+const extractExport = { target: path.join(OUT, "extracted.pdf") };
+await extractDownload.saveAs(extractExport.target);
+await installHarness();
+const extractResult = await measureExportedInk(extractExport.target, 0);
+check(
+  "選択中のページだけを抽出できる",
+  extractResult.pageCount === 1,
+  `${extractResult.pageCount}ページ`,
+);
+
+// ---------------------------------------------------------------
+// 19) スタンプ
+// ---------------------------------------------------------------
+console.log("\n[19] スタンプ");
+await openFixture("single-page.pdf");
+await pickTool("フリーハンド");
+await drawOn(0, [0.2, 0.2], [0.5, 0.35], 25);
+await pickTool("選択");
+await page.waitForTimeout(200);
+await inspectorButton("スタンプとして保存").click();
+await page.waitForTimeout(300);
+await page.getByLabel("スタンプの名前").fill("テスト署名");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.waitForTimeout(400);
+
+const beforePlace = await shapeCount();
+await page.getByRole("button", { name: "テスト署名 を配置" }).click();
+await page.waitForTimeout(400);
+const afterPlace = await shapeCount();
+check(
+  "保存したスタンプを配置できる",
+  afterPlace > beforePlace,
+  `${beforePlace} → ${afterPlace}`,
+);
+
+// ---------------------------------------------------------------
+// 20) 自動保存と復帰
+// ---------------------------------------------------------------
+console.log("\n[20] 自動保存と復帰");
+await openFixture("single-page.pdf");
+await addText("保存テスト用テキスト", 0, 0.2, 0.2);
+await page.waitForTimeout(2500);
+
+await page.reload({ waitUntil: "domcontentloaded" });
+await page.waitForLoadState("networkidle").catch(() => {});
+await page.waitForTimeout(1200);
+const restoreVisible = await page
+  .getByRole("button", { name: "続きから再開" })
+  .count();
+check("再読み込み後に復帰を促される", restoreVisible > 0);
+
+if (restoreVisible > 0) {
+  await page.getByRole("button", { name: "続きから再開" }).click();
+  await page.waitForSelector("svg[data-edit-layer]", { timeout: 30000 });
+  await page.waitForTimeout(1500);
+  const restoredText = await page.evaluate(
+    () =>
+      document.querySelector("[data-page-index] svg[data-edit-layer] > text")
+        ?.textContent ?? null,
+  );
+  check(
+    "編集内容が復元される",
+    restoredText === "保存テスト用テキスト",
+    String(restoredText),
+  );
+}
+
+// ---------------------------------------------------------------
+// 21) ペン入力（筆圧・手のひら誤爆よけ）
+// ---------------------------------------------------------------
+console.log("\n[21] ペン入力");
+await openFixture("single-page.pdf");
+await pickTool("フリーハンド");
+await page.evaluate(async () => {
+  const svg = document.querySelector('[data-page-index="0"] svg[data-edit-layer]');
+  const box = svg.getBoundingClientRect();
+  const send = (type, nx, ny, pressure, pointerType) =>
+    svg.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType,
+        pressure,
+        button: 0,
+        buttons: 1,
+        clientX: box.x + box.width * nx,
+        clientY: box.y + box.height * ny,
+      }),
+    );
+
+  send("pointerdown", 0.2, 0.3, 0.2, "pen");
+  for (let i = 1; i <= 20; i += 1) {
+    send("pointermove", 0.2 + i * 0.02, 0.3 + Math.sin(i / 3) * 0.05, i / 20, "pen");
+  }
+  send("pointerup", 0.6, 0.3, 0.9, "pen");
+});
+await page.waitForTimeout(400);
+
+const pressureShape = await page.evaluate(
+  () =>
+    document.querySelectorAll("[data-page-index] svg[data-edit-layer] > polygon")
+      .length,
+);
+check(
+  "ペン入力は筆圧に応じた太さで描かれる",
+  pressureShape > 0,
+  `polygon ${pressureShape}`,
+);
+
+// 手のひら（タッチ）は無視される
+const beforePalm = await shapeCount();
+await page.evaluate(async () => {
+  const svg = document.querySelector('[data-page-index="0"] svg[data-edit-layer]');
+  const box = svg.getBoundingClientRect();
+  const send = (type, nx, ny) =>
+    svg.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 2,
+        pointerType: "touch",
+        pressure: 0.5,
+        button: 0,
+        buttons: 1,
+        clientX: box.x + box.width * nx,
+        clientY: box.y + box.height * ny,
+      }),
+    );
+  send("pointerdown", 0.2, 0.7);
+  send("pointermove", 0.5, 0.8);
+  send("pointerup", 0.5, 0.8);
+});
+await page.waitForTimeout(300);
+check(
+  "ペン使用後は手のひら（タッチ）を無視する",
+  (await shapeCount()) === beforePalm,
+);
+
+
+// ---------------------------------------------------------------
+// 22) パスワード保護PDF
+// ---------------------------------------------------------------
+console.log("\n[22] パスワード保護PDF");
+let hasEncryptedFixture = true;
+try {
+  await fs.access(path.join(FIXTURES, "encrypted.pdf"));
+} catch {
+  hasEncryptedFixture = false;
+  check("保護されたPDFでパスワード入力が出る", false, "fixture がありません");
+}
+
+if (hasEncryptedFixture) {
+  await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle").catch(() => {});
+  // 前回の自動保存が残っていると復帰ダイアログが邪魔をする。
+  const discard = page.getByRole("button", { name: "破棄して新規" });
+  if ((await discard.count()) > 0) await discard.click();
+
+  await page
+    .locator('input[type="file"][accept*="pdf"]')
+    .first()
+    .setInputFiles(path.join(FIXTURES, "encrypted.pdf"));
+  await page.waitForTimeout(2000);
+
+  const promptShown = await page.getByLabel("パスワード").count();
+  check("保護されたPDFでパスワード入力が出る", promptShown > 0);
+
+  if (promptShown > 0) {
+    // まず間違ったパスワードを入れる
+    await page.getByLabel("パスワード").fill("wrong");
+    await page.getByRole("dialog").getByRole("button", { name: "開く" }).click();
+    await page.waitForTimeout(1500);
+    const wrongMessage = await page.locator('[role="alert"]').allTextContents();
+    check(
+      "間違ったパスワードだと知らせてくれる",
+      wrongMessage.join("").includes("パスワードが違います"),
+      wrongMessage.join("").slice(0, 40),
+    );
+
+    await page.getByLabel("パスワード").fill("secret");
+    await page.getByRole("dialog").getByRole("button", { name: "開く" }).click();
+    await page.waitForSelector("svg[data-edit-layer]", { timeout: 30000 });
+    await page.waitForFunction(
+      () => !document.querySelector('[data-page-index="0"] .animate-spin'),
+      undefined,
+      { timeout: 30000 },
+    );
+    check("正しいパスワードで開ける", true);
+
+    // 開いたあとは普通に編集・書き出しできる
+    await addText("保護PDFへの追記", 0, 0.2, 0.3);
+    await waitForFont();
+    const protectedExport = await exportAndSave("from-protected.pdf");
+    await installHarness();
+    const protectedResult = await measureExportedInk(protectedExport.target);
+    check(
+      "保護PDFにも編集して書き出せる",
+      protectedResult.textItems.join("").includes("保護PDFへの追記"),
+      protectedResult.textItems.join("").slice(0, 40),
+    );
+  }
+}
 
 // ---------------------------------------------------------------
 // まとめ

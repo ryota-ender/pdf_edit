@@ -47,7 +47,18 @@ export interface OpenedPdf {
   destroy: () => Promise<void>;
 }
 
-export async function loadPdfDocument(bytes: Uint8Array): Promise<OpenedPdf> {
+/** パスワードが要るときに投げる。呼び出し側で入力を促す。 */
+export class PasswordRequiredError extends Error {
+  constructor(readonly wasWrong: boolean) {
+    super(wasWrong ? "パスワードが違います。" : "パスワードが必要です。");
+    this.name = "PasswordRequiredError";
+  }
+}
+
+export async function loadPdfDocument(
+  bytes: Uint8Array,
+  password?: string,
+): Promise<OpenedPdf> {
   const pdfjs = await loadPdfJs().catch((error) => {
     throw new PdfEditorError(
       "PDF表示エンジン (PDF.js) の読み込みに失敗しました。ページを再読み込みしてください。",
@@ -57,6 +68,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<OpenedPdf> {
 
   const task = pdfjs.getDocument({
     data: bytes.slice(),
+    password,
     cMapUrl: `${PDFJS_ASSET_BASE}cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${PDFJS_ASSET_BASE}standard_fonts/`,
@@ -72,6 +84,13 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<OpenedPdf> {
     };
   } catch (error) {
     await task.destroy().catch(() => undefined);
+
+    // パスワード保護は「開けない」ではなく「入力を求める」で扱う。
+    if (error instanceof Error && error.name === "PasswordException") {
+      // code 1 = 入力が必要 / 2 = 入力が違う。
+      const code = (error as Error & { code?: number }).code;
+      throw new PasswordRequiredError(code === 2);
+    }
     throw translatePdfJsError(error);
   }
 }

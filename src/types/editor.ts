@@ -7,7 +7,9 @@ export type ToolId =
   | "ellipse"
   | "arrow"
   | "pen"
-  | "image";
+  | "image"
+  | "stamp"
+  | "textEdit";
 
 /** 図形を描くツール（ドラッグして作るもの）。 */
 export const DRAW_TOOLS = [
@@ -32,6 +34,12 @@ interface ElementBase {
   pageIndex: number;
   /** 0〜1。 */
   opacity: number;
+  /** 要素自身の回転角（度・時計回り）。中心を軸に回す。 */
+  rotation: number;
+  /** true の間は選択もドラッグもできない。 */
+  locked: boolean;
+  /** 同じ値を持つ要素はまとめて選択・移動される。 */
+  groupId: string | null;
 }
 
 /** 矩形で位置と大きさが決まる要素。左上が (x, y)。 */
@@ -41,6 +49,8 @@ interface BoxGeometry {
   w: number;
   h: number;
 }
+
+export type FontWeight = "regular" | "bold";
 
 export interface TextElement extends ElementBase {
   type: "text";
@@ -52,6 +62,14 @@ export interface TextElement extends ElementBase {
   fontSize: number;
   color: string;
   align: "left" | "center" | "right";
+  fontWeight: FontWeight;
+  /** 疑似イタリック。日本語フォントに斜体が無いため字送りを傾けて表現する。 */
+  italic: boolean;
+  /**
+   * 折り返し幅（正規化）。null なら折り返さず、改行だけで行が決まる。
+   * 値があるときはこの幅で自動折り返しし、日本語の禁則処理も適用する。
+   */
+  width: number | null;
 }
 
 export interface RectElement extends ElementBase, BoxGeometry {
@@ -92,12 +110,20 @@ export interface ArrowElement extends ElementBase {
   head: boolean;
 }
 
+/** フリーハンドの 1 点。`p` は筆圧 (0〜1)。 */
+export interface PenPoint {
+  x: number;
+  y: number;
+  p?: number;
+}
+
 export interface PenElement extends ElementBase {
   type: "pen";
-  /** 通過点の正規化座標。 */
-  points: { x: number; y: number }[];
+  points: PenPoint[];
   color: string;
   strokeWidth: number;
+  /** 筆圧に応じて線幅を変える。ペン入力で描いたときに有効になる。 */
+  pressure: boolean;
 }
 
 export interface ImageElement extends ElementBase, BoxGeometry {
@@ -129,6 +155,13 @@ export function isBoxElement(
   );
 }
 
+/** 塗り・枠線を持つ図形かどうか。 */
+export function isShapeElement(
+  element: EditorElement,
+): element is RectElement | EllipseElement {
+  return element.type === "rect" || element.type === "ellipse";
+}
+
 /** ページに対して 90 度単位で加える回転量。 */
 export type RotationDelta = 0 | 90 | 180 | 270;
 
@@ -136,6 +169,11 @@ export type RotationDelta = 0 | 90 | 180 | 270;
 export interface PageState {
   /** 元 PDF における 0 始まりのページ番号。並べ替えても変わらない。 */
   sourceIndex: number;
+  /**
+   * どの読み込み済みファイル由来か。PDF 結合に対応するため、
+   * ページごとに出どころを持つ。単一ファイルなら常に既定値。
+   */
+  sourceId: string;
   /** 元 PDF のページ回転に対して、エディタ上で追加した時計回りの回転量。 */
   rotation: RotationDelta;
 }
@@ -146,6 +184,7 @@ export interface PageState {
  */
 export interface EditorDoc {
   pages: PageState[];
+  /** 配列の順序がそのまま重なり順（後ろの要素ほど手前）。 */
   elements: EditorElement[];
 }
 
@@ -161,4 +200,9 @@ export interface NormalizedRect {
   y: number;
   w: number;
   h: number;
+}
+
+export interface Point {
+  x: number;
+  y: number;
 }

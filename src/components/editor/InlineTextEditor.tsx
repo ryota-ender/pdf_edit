@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FONT_FAMILY } from "@/lib/pdf/font";
+import { FONT_FAMILIES } from "@/lib/pdf/font";
 import {
   LINE_HEIGHT_FACTOR,
   sanitizeText,
   splitLines,
 } from "@/lib/pdf/textLayout";
-import type { LoadedFont } from "@/lib/pdf/font";
+import type { FontBook } from "@/lib/pdf/font";
 import type { TextElement } from "@/types/editor";
 
 interface InlineTextEditorProps {
@@ -16,7 +16,7 @@ interface InlineTextEditorProps {
   view: { width: number; height: number };
   /** 1 PDFポイントあたりの CSS ピクセル数（ズーム込み）。 */
   cssPxPerPoint: number;
-  font: LoadedFont;
+  fonts: FontBook;
   /** 入力途中の内容。履歴には積まない。 */
   onPreview: (text: string) => void;
   /** 編集終了。ここで初めて履歴に 1 件積む。 */
@@ -36,10 +36,11 @@ export function InlineTextEditor({
   element,
   view,
   cssPxPerPoint,
-  font,
+  fonts,
   onPreview,
   onFinish,
 }: InlineTextEditorProps) {
+  const font = fonts.get(element.fontWeight);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState(element.text);
   const isComposingRef = useRef(false);
@@ -66,12 +67,17 @@ export function InlineTextEditor({
   const top = baselinePx - (halfLeading + ascentRatio * fontSizePx);
   const left = element.x * view.width * cssPxPerPoint;
 
+  // 折り返し幅が決まっている要素はその幅で、そうでなければ内容に合わせる。
   const lines = splitLines(draft);
-  const widthPx =
+  const naturalWidthPx =
     lines.reduce(
       (max, line) => Math.max(max, font.measureText(line, element.fontSize)),
       0,
     ) * cssPxPerPoint;
+  const widthPx =
+    element.width === null
+      ? naturalWidthPx
+      : element.width * view.width * cssPxPerPoint;
 
   const finish = (value: string) => {
     if (finishedRef.current) return;
@@ -84,7 +90,7 @@ export function InlineTextEditor({
       ref={textareaRef}
       value={draft}
       spellCheck={false}
-      wrap="off"
+      wrap={element.width === null ? "off" : "soft"}
       onChange={(event) => {
         const value = event.target.value;
         setDraft(value);
@@ -120,13 +126,16 @@ export function InlineTextEditor({
         top,
         width: Math.max(widthPx + fontSizePx * 0.6, 48),
         height: lines.length * lineHeightPx + halfLeading * 2,
-        fontFamily: `"${FONT_FAMILY}", sans-serif`,
+        fontFamily: `"${FONT_FAMILIES[element.fontWeight]}", sans-serif`,
         fontSize: fontSizePx,
         lineHeight: `${lineHeightPx}px`,
         color: element.color,
         textAlign: element.align,
+        fontStyle: element.italic ? "oblique 12deg" : "normal",
       }}
-      className="resize-none overflow-hidden rounded-[2px] border-0 bg-white/85 p-0 whitespace-pre shadow-[0_0_0_2px_#2563eb] outline-none"
+      className={`resize-none overflow-hidden rounded-[2px] border-0 bg-white/85 p-0 shadow-[0_0_0_2px_#2563eb] outline-none ${
+        element.width === null ? "whitespace-pre" : "whitespace-pre-wrap"
+      }`}
     />
   );
 }

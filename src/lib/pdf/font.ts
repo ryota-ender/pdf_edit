@@ -1,5 +1,6 @@
 import type { Font as FontkitFont, Subset as FontkitSubset } from "fontkit";
 import { PdfEditorError } from "./errors";
+import type { FontWeight } from "@/types/editor";
 
 /**
  * 日本語フォントの扱い
@@ -8,13 +9,23 @@ import { PdfEditorError } from "./errors";
  * 同じフォントの同じメトリクスで文字送りを計算するので、画面上の位置と
  * 出力 PDF の位置が一致する。
  *
- * フォントは初回に必要になったタイミングで初めて取得する。5MB 強あるため、
- * PDF を開いただけの状態ではダウンロードしない。
+ * ウェイトは Regular と Bold の 2 本。どちらも初回に必要になった時点で
+ * 初めて取得する。1 本 5MB 強あるため、使わないウェイトは落とさない。
  */
 
-export const FONT_URL = "/fonts/NotoSansJP-Regular.ttf";
+export const FONT_URLS: Record<FontWeight, string> = {
+  regular: "/fonts/NotoSansJP-Regular.ttf",
+  bold: "/fonts/NotoSansJP-Bold.ttf",
+};
+
 /** globals.css の @font-face と揃えること。 */
-export const FONT_FAMILY = "NotoSansJPEmbedded";
+export const FONT_FAMILIES: Record<FontWeight, string> = {
+  regular: "NotoSansJPEmbedded",
+  bold: "NotoSansJPEmbeddedBold",
+};
+
+/** 疑似イタリックの傾き（度）。日本語フォントに斜体が無いため字送りを傾ける。 */
+export const ITALIC_SKEW_DEGREES = 12;
 
 export interface FontMetrics {
   unitsPerEm: number;
@@ -25,6 +36,7 @@ export interface FontMetrics {
 }
 
 export interface LoadedFont {
+  weight: FontWeight;
   metrics: FontMetrics;
   /**
    * 文字列の送り幅をポイント単位で返す。
@@ -35,6 +47,13 @@ export interface LoadedFont {
   measureText(text: string, fontSize: number): number;
   /** pdf-lib へ渡すためのバイト列のコピー。 */
   cloneBytes(): Uint8Array;
+}
+
+/** ウェイトごとのフォントをまとめて引けるようにしたもの。 */
+export interface FontBook {
+  get(weight: FontWeight): LoadedFont;
+  /** 読み込み済みのウェイトだけを返す。 */
+  loaded(): LoadedFont[];
 }
 
 /**
@@ -56,21 +75,27 @@ export async function loadFontkit(): Promise<FontkitModule> {
   return fontkitPromise;
 }
 
-let loadedFontPromise: Promise<LoadedFont> | null = null;
+const loadedFontPromises = new Map<FontWeight, Promise<LoadedFont>>();
 
-export async function loadJapaneseFont(): Promise<LoadedFont> {
-  loadedFontPromise ??= createLoadedFont().catch((error) => {
+export async function loadJapaneseFont(
+  weight: FontWeight = "regular",
+): Promise<LoadedFont> {
+  const cached = loadedFontPromises.get(weight);
+  if (cached) return cached;
+
+  const promise = createLoadedFont(weight).catch((error) => {
     // 失敗したら次回に再試行できるようにキャッシュを捨てる。
-    loadedFontPromise = null;
+    loadedFontPromises.delete(weight);
     throw error;
   });
-  return loadedFontPromise;
+  loadedFontPromises.set(weight, promise);
+  return promise;
 }
 
-async function createLoadedFont(): Promise<LoadedFont> {
+async function createLoadedFont(weight: FontWeight): Promise<LoadedFont> {
   let bytes: Uint8Array;
   try {
-    const response = await fetch(FONT_URL);
+    const response = await fetch(FONT_URLS[weight]);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -116,10 +141,39 @@ async function createLoadedFont(): Promise<LoadedFont> {
   };
 
   return {
+    weight,
     metrics,
     measureText: (text, fontSize) =>
       text.length === 0 ? 0 : measureUnitWidth(text) * fontSize,
     cloneBytes: () => bytes.slice(),
+  };
+}
+
+/**
+ * フォント未読み込み時に使う近似メトリクス。
+ * 全角はほぼ 1em、半角はほぼ 0.5em として概算する。実測値に置き換わると
+ * 位置が僅かに動くが、書き出しには必ず実フォントが使われる。
+ */
+export function createFallbackFont(weight: FontWeight = "regular"): LoadedFont {
+  const metrics: FontMetrics = {
+    unitsPerEm: 1000,
+    ascentRatio: 1.16,
+    descentRatio: 0.288,
+  };
+
+  return {
+    weight,
+    metrics,
+    measureText: (text, fontSize) => {
+      let units = 0;
+      for (const char of text) {
+        units += /[ -ÿ]/.test(char) ? 0.5 : 1;
+      }
+      return units * fontSize;
+    },
+    cloneBytes: () => {
+      throw new PdfEditorError("日本語フォントがまだ読み込まれていません。");
+    },
   };
 }
 
@@ -173,33 +227,6 @@ export function createFontkitAdapter(fontkit: FontkitModule): unknown {
       };
 
       return font;
-    },
-  };
-}
-
-/**
- * フォント取得が終わるまでの間だけ使う近似メトリクス。
- * 全角はほぼ 1em、半角はほぼ 0.5em として概算する。実測値に置き換わると
- * 位置が僅かに動くが、書き出しには必ず実フォントが使われる。
- */
-export function createFallbackFont(): LoadedFont {
-  const metrics: FontMetrics = {
-    unitsPerEm: 1000,
-    ascentRatio: 1.16,
-    descentRatio: 0.288,
-  };
-
-  return {
-    metrics,
-    measureText: (text, fontSize) => {
-      let units = 0;
-      for (const char of text) {
-        units += /[ -ÿ]/.test(char) ? 0.5 : 1;
-      }
-      return units * fontSize;
-    },
-    cloneBytes: () => {
-      throw new PdfEditorError("日本語フォントがまだ読み込まれていません。");
     },
   };
 }

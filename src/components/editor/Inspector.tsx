@@ -7,18 +7,29 @@ import {
 } from "@/lib/pdf/textLayout";
 import { clamp } from "@/lib/pdf/coordinates";
 import { ELEMENT_LABELS } from "@/lib/pdf/elementDefaults";
+import type { AlignMode } from "@/lib/pdf/geometry";
+import type { SavedStamp } from "@/lib/pdf/stamps";
 import {
   AlignCenterIcon,
   AlignLeftIcon,
   AlignRightIcon,
+  BoldIcon,
+  BringForwardIcon,
   DuplicateIcon,
+  GroupIcon,
+  ItalicIcon,
+  LockIcon,
   RotateIcon,
+  SendBackwardIcon,
+  StampIcon,
   TrashIcon,
+  UngroupIcon,
+  UnlockIcon,
+  WrapIcon,
 } from "./Icons";
 import type { EditorElement, PageState, TextElement } from "@/types/editor";
-import { isBoxElement } from "@/types/editor";
+import { isBoxElement, isShapeElement } from "@/types/editor";
 
-/** パネル幅に 1 行で収まる数に絞っている。任意の色はカラーピッカーから。 */
 const TEXT_COLORS = [
   "#111827",
   "#dc2626",
@@ -42,16 +53,25 @@ interface InspectorProps {
   page: PageState | null;
   pageIndex: number;
   pageCount: number;
-  /** 履歴に積まない更新（スライダーのドラッグ中など）。 */
+  stamps: SavedStamp[];
   onPreview: (patch: Partial<EditorElement>) => void;
-  /** 履歴に 1 件積む更新。 */
   onCommit: (patch: Partial<EditorElement>) => void;
   onBeginTransaction: () => void;
   onEndTransaction: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
+  onReorder: (direction: "front" | "back" | "forward" | "backward") => void;
+  onAlign: (mode: AlignMode) => void;
+  onDistribute: (axis: "horizontal" | "vertical") => void;
+  onGroup: () => void;
+  onUngroup: () => void;
+  onToggleLock: () => void;
+  onSaveStamp: () => void;
+  onPlaceStamp: (stamp: SavedStamp) => void;
+  onDeleteStamp: (id: string) => void;
   onRotatePage: () => void;
   onDeletePage: () => void;
+  onExtractPage: () => void;
 }
 
 /** 右側のプロパティ欄。選択している要素の種類に応じて中身が変わる。 */
@@ -60,16 +80,29 @@ export function Inspector({
   page,
   pageIndex,
   pageCount,
+  stamps,
   onPreview,
   onCommit,
   onBeginTransaction,
   onEndTransaction,
   onDelete,
   onDuplicate,
+  onReorder,
+  onAlign,
+  onDistribute,
+  onGroup,
+  onUngroup,
+  onToggleLock,
+  onSaveStamp,
+  onPlaceStamp,
+  onDeleteStamp,
   onRotatePage,
   onDeletePage,
+  onExtractPage,
 }: InspectorProps) {
   const single = selected.length === 1 ? selected[0] : null;
+  const isLocked = selected.length > 0 && selected.every((item) => item.locked);
+  const hasGroup = selected.some((item) => item.groupId !== null);
 
   return (
     <aside className="flex w-72 shrink-0 flex-col border-l border-slate-200 bg-white">
@@ -83,6 +116,17 @@ export function Inspector({
         </span>
         {selected.length > 0 && (
           <div className="flex items-center gap-0.5">
+            <IconAction
+              label={isLocked ? "ロックを解除" : "ロック"}
+              onClick={onToggleLock}
+              active={isLocked}
+            >
+              {isLocked ? (
+                <LockIcon className="h-4 w-4" />
+              ) : (
+                <UnlockIcon className="h-4 w-4" />
+              )}
+            </IconAction>
             <IconAction label="複製 (Cmd/Ctrl+D)" onClick={onDuplicate}>
               <DuplicateIcon className="h-4 w-4" />
             </IconAction>
@@ -104,6 +148,19 @@ export function Inspector({
           </p>
         )}
 
+        {selected.length > 0 && (
+          <ArrangeSection
+            count={selected.length}
+            hasGroup={hasGroup}
+            onReorder={onReorder}
+            onAlign={onAlign}
+            onDistribute={onDistribute}
+            onGroup={onGroup}
+            onUngroup={onUngroup}
+            onSaveStamp={onSaveStamp}
+          />
+        )}
+
         {single?.type === "text" && (
           <TextSection
             element={single}
@@ -114,7 +171,7 @@ export function Inspector({
           />
         )}
 
-        {(single?.type === "rect" || single?.type === "ellipse") && (
+        {single && isShapeElement(single) && (
           <ShapeSection
             element={single}
             onPreview={onPreview}
@@ -165,58 +222,101 @@ export function Inspector({
               />
             </Field>
 
-            {isBoxElement(single) && (
-              <div className="grid grid-cols-2 gap-2">
-                <Field label="X (%)" htmlFor="prop-x">
-                  <PercentInput
-                    id="prop-x"
-                    value={single.x}
-                    onCommit={(x) => onCommit({ x })}
-                  />
-                </Field>
-                <Field label="Y (%)" htmlFor="prop-y">
-                  <PercentInput
-                    id="prop-y"
-                    value={single.y}
-                    onCommit={(y) => onCommit({ y })}
-                  />
-                </Field>
-                <Field label="幅 (%)" htmlFor="prop-w">
-                  <PercentInput
-                    id="prop-w"
-                    value={single.w}
-                    onCommit={(w) => onCommit({ w })}
-                  />
-                </Field>
-                <Field label="高さ (%)" htmlFor="prop-h">
-                  <PercentInput
-                    id="prop-h"
-                    value={single.h}
-                    onCommit={(h) => onCommit({ h })}
-                  />
-                </Field>
+            <Field label={`回転 (${Math.round(single.rotation)}°)`}>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={359}
+                  step={1}
+                  value={Math.round(single.rotation)}
+                  onPointerDown={onBeginTransaction}
+                  onChange={(event) =>
+                    onPreview({ rotation: Number(event.target.value) })
+                  }
+                  onPointerUp={onEndTransaction}
+                  aria-label="回転"
+                  className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-blue-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => onCommit({ rotation: 0 })}
+                  title="回転をもとに戻す"
+                  className="rounded-md border border-slate-300 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50"
+                >
+                  0°
+                </button>
               </div>
-            )}
+            </Field>
 
-            {single.type === "text" && (
-              <div className="grid grid-cols-2 gap-2">
-                <Field label="X (%)" htmlFor="prop-x">
-                  <PercentInput
-                    id="prop-x"
-                    value={single.x}
-                    onCommit={(x) => onCommit({ x })}
-                  />
-                </Field>
-                <Field label="Y (%)" htmlFor="prop-y">
-                  <PercentInput
-                    id="prop-y"
-                    value={single.y}
-                    onCommit={(y) => onCommit({ y })}
-                  />
-                </Field>
-              </div>
-            )}
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="X (%)" htmlFor="prop-x">
+                <PercentInput
+                  id="prop-x"
+                  value={"x" in single ? single.x : 0}
+                  onCommit={(x) => onCommit({ x })}
+                  disabled={!("x" in single)}
+                />
+              </Field>
+              <Field label="Y (%)" htmlFor="prop-y">
+                <PercentInput
+                  id="prop-y"
+                  value={"y" in single ? single.y : 0}
+                  onCommit={(y) => onCommit({ y })}
+                  disabled={!("y" in single)}
+                />
+              </Field>
+              {isBoxElement(single) && (
+                <>
+                  <Field label="幅 (%)" htmlFor="prop-w">
+                    <PercentInput
+                      id="prop-w"
+                      value={single.w}
+                      onCommit={(w) => onCommit({ w })}
+                    />
+                  </Field>
+                  <Field label="高さ (%)" htmlFor="prop-h">
+                    <PercentInput
+                      id="prop-h"
+                      value={single.h}
+                      onCommit={(h) => onCommit({ h })}
+                    />
+                  </Field>
+                </>
+              )}
+            </div>
           </>
+        )}
+
+        {stamps.length > 0 && (
+          <section className="border-t border-slate-200 pt-4">
+            <h3 className="text-xs font-semibold text-slate-500">
+              保存したスタンプ
+            </h3>
+            <ul className="mt-2 space-y-1">
+              {stamps.map((stamp) => (
+                <li key={stamp.id} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onPlaceStamp(stamp)}
+                    className="flex-1 truncate rounded-md border border-slate-200 px-2 py-1.5 text-left text-xs text-slate-700 transition-colors hover:border-blue-300 hover:bg-blue-50"
+                    aria-label={`${stamp.label} を配置`}
+                    title={`${stamp.label} を配置`}
+                  >
+                    {stamp.label}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteStamp(stamp.id)}
+                    aria-label={`${stamp.label} を削除`}
+                    className="rounded p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                  >
+                    <TrashIcon className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
         )}
 
         {page && (
@@ -226,24 +326,24 @@ export function Inspector({
               {pageIndex + 1} / {pageCount} ページ
               {page.rotation !== 0 && `（${page.rotation}° 回転）`}
             </p>
-            <div className="mt-3 flex gap-2">
-              <button
-                type="button"
-                onClick={onRotatePage}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50"
-              >
-                <RotateIcon className="h-3.5 w-3.5" />
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <SmallButton onClick={onRotatePage} icon={<RotateIcon className="h-3.5 w-3.5" />}>
                 90°回転
-              </button>
-              <button
-                type="button"
+              </SmallButton>
+              <SmallButton
+                onClick={onExtractPage}
+                icon={<DuplicateIcon className="h-3.5 w-3.5" />}
+              >
+                ページ抽出
+              </SmallButton>
+              <SmallButton
                 onClick={onDeletePage}
                 disabled={pageCount <= 1}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:border-slate-300 disabled:hover:bg-transparent"
+                danger
+                icon={<TrashIcon className="h-3.5 w-3.5" />}
               >
-                <TrashIcon className="h-3.5 w-3.5" />
                 ページ削除
-              </button>
+              </SmallButton>
             </div>
           </section>
         )}
@@ -253,6 +353,140 @@ export function Inspector({
 }
 
 // ---------------------------------------------------------------------------
+
+interface ArrangeSectionProps {
+  count: number;
+  hasGroup: boolean;
+  onReorder: (direction: "front" | "back" | "forward" | "backward") => void;
+  onAlign: (mode: AlignMode) => void;
+  onDistribute: (axis: "horizontal" | "vertical") => void;
+  onGroup: () => void;
+  onUngroup: () => void;
+  onSaveStamp: () => void;
+}
+
+function ArrangeSection({
+  count,
+  hasGroup,
+  onReorder,
+  onAlign,
+  onDistribute,
+  onGroup,
+  onUngroup,
+  onSaveStamp,
+}: ArrangeSectionProps) {
+  const alignments: { mode: AlignMode; label: string }[] = [
+    { mode: "left", label: "左揃え" },
+    { mode: "hcenter", label: "左右中央" },
+    { mode: "right", label: "右揃え" },
+    { mode: "top", label: "上揃え" },
+    { mode: "vcenter", label: "上下中央" },
+    { mode: "bottom", label: "下揃え" },
+  ];
+
+  return (
+    <section className="space-y-3">
+      <Field label="重なり順">
+        <div className="grid grid-cols-4 gap-1">
+          <TinyButton label="最前面へ" onClick={() => onReorder("front")}>
+            <BringForwardIcon className="h-4 w-4" />
+          </TinyButton>
+          <TinyButton label="前面へ" onClick={() => onReorder("forward")}>
+            <span className="text-[11px] font-semibold">+1</span>
+          </TinyButton>
+          <TinyButton label="背面へ" onClick={() => onReorder("backward")}>
+            <span className="text-[11px] font-semibold">-1</span>
+          </TinyButton>
+          <TinyButton label="最背面へ" onClick={() => onReorder("back")}>
+            <SendBackwardIcon className="h-4 w-4" />
+          </TinyButton>
+        </div>
+      </Field>
+
+      {count > 1 && (
+        <>
+          <Field label="整列">
+            <div className="grid grid-cols-6 gap-1">
+              {alignments.map(({ mode, label }) => (
+                <TinyButton
+                  key={mode}
+                  label={label}
+                  onClick={() => onAlign(mode)}
+                >
+                  <AlignGlyph mode={mode} />
+                </TinyButton>
+              ))}
+            </div>
+          </Field>
+
+          {count > 2 && (
+            <Field label="等間隔に配置">
+              <div className="grid grid-cols-2 gap-1">
+                <TinyButton
+                  label="左右に等間隔"
+                  onClick={() => onDistribute("horizontal")}
+                >
+                  <span className="text-[11px]">横</span>
+                </TinyButton>
+                <TinyButton
+                  label="上下に等間隔"
+                  onClick={() => onDistribute("vertical")}
+                >
+                  <span className="text-[11px]">縦</span>
+                </TinyButton>
+              </div>
+            </Field>
+          )}
+        </>
+      )}
+
+      <div className="flex gap-1">
+        {count > 1 && (
+          <TinyButton label="グループ化 (Cmd/Ctrl+G)" onClick={onGroup} wide>
+            <GroupIcon className="h-4 w-4" />
+          </TinyButton>
+        )}
+        {hasGroup && (
+          <TinyButton
+            label="グループ解除 (Cmd/Ctrl+Shift+G)"
+            onClick={onUngroup}
+            wide
+          >
+            <UngroupIcon className="h-4 w-4" />
+          </TinyButton>
+        )}
+        <TinyButton label="スタンプとして保存" onClick={onSaveStamp} wide>
+          <StampIcon className="h-4 w-4" />
+        </TinyButton>
+      </div>
+    </section>
+  );
+}
+
+/** 整列ボタンの中の簡単な図。 */
+function AlignGlyph({ mode }: { mode: AlignMode }) {
+  const horizontal = mode === "left" || mode === "hcenter" || mode === "right";
+  const position =
+    mode === "left" || mode === "top"
+      ? "start"
+      : mode === "right" || mode === "bottom"
+        ? "end"
+        : "center";
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`flex h-4 w-4 ${horizontal ? "flex-col" : "flex-row"} items-${position} justify-center gap-0.5`}
+    >
+      <span
+        className={`bg-current ${horizontal ? "h-1 w-3.5" : "h-3.5 w-1"} rounded-sm`}
+      />
+      <span
+        className={`bg-current ${horizontal ? "h-1 w-2" : "h-2 w-1"} rounded-sm`}
+      />
+    </span>
+  );
+}
 
 interface SectionProps<T extends EditorElement> {
   element: T;
@@ -330,25 +564,69 @@ function TextSection({
         </div>
       </Field>
 
-      <Field label="行揃え">
-        <div className="inline-flex rounded-lg border border-slate-300 p-0.5">
+      <Field label="書式">
+        <div className="flex items-center gap-1">
+          <ToggleButton
+            label="太字"
+            active={element.fontWeight === "bold"}
+            onClick={() =>
+              onCommit({
+                fontWeight: element.fontWeight === "bold" ? "regular" : "bold",
+              })
+            }
+          >
+            <BoldIcon className="h-4 w-4" />
+          </ToggleButton>
+          <ToggleButton
+            label="斜体"
+            active={element.italic}
+            onClick={() => onCommit({ italic: !element.italic })}
+          >
+            <ItalicIcon className="h-4 w-4" />
+          </ToggleButton>
+          <span className="mx-1 h-5 w-px bg-slate-200" />
           {alignments.map(({ value, label, Icon }) => (
-            <button
+            <ToggleButton
               key={value}
-              type="button"
-              title={label}
-              aria-label={label}
-              aria-pressed={element.align === value}
+              label={label}
+              active={element.align === value}
               onClick={() => onCommit({ align: value })}
-              className={`grid h-7 w-9 place-items-center rounded-md transition-colors ${
-                element.align === value
-                  ? "bg-slate-900 text-white"
-                  : "text-slate-500 hover:bg-slate-100"
-              }`}
             >
               <Icon className="h-4 w-4" />
-            </button>
+            </ToggleButton>
           ))}
+        </div>
+      </Field>
+
+      <Field label="折り返し">
+        <div className="flex items-center gap-2">
+          <ToggleButton
+            label={
+              element.width === null
+                ? "折り返しを有効にする"
+                : "折り返しをやめる"
+            }
+            active={element.width !== null}
+            onClick={() => onCommit({ width: element.width === null ? 0.4 : null })}
+          >
+            <WrapIcon className="h-4 w-4" />
+          </ToggleButton>
+          {element.width !== null && (
+            <input
+              type="range"
+              min={5}
+              max={100}
+              step={1}
+              value={Math.round(element.width * 100)}
+              onPointerDown={onBeginTransaction}
+              onChange={(event) =>
+                onPreview({ width: Number(event.target.value) / 100 })
+              }
+              onPointerUp={onEndTransaction}
+              aria-label="折り返し幅"
+              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-blue-600"
+            />
+          )}
         </div>
       </Field>
 
@@ -472,6 +750,12 @@ function StrokeSection({
           矢印の先端をつける
         </label>
       )}
+
+      {element.type === "pen" && element.pressure && (
+        <p className="rounded-md bg-slate-50 px-2 py-1.5 text-[11px] text-slate-500">
+          筆圧を反映して描かれています。
+        </p>
+      )}
     </>
   );
 }
@@ -553,7 +837,9 @@ function Swatches({
           aria-label="なし"
           aria-pressed={value === null}
           className={`relative h-6 w-6 overflow-hidden rounded border bg-white transition-transform hover:scale-110 ${
-            value === null ? "border-blue-500 ring-2 ring-blue-500/30" : "border-slate-300"
+            value === null
+              ? "border-blue-500 ring-2 ring-blue-500/30"
+              : "border-slate-300"
           }`}
         >
           <span className="absolute inset-0 m-auto h-px w-8 origin-center rotate-45 bg-red-400" />
@@ -583,10 +869,12 @@ function PercentInput({
   id,
   value,
   onCommit,
+  disabled,
 }: {
   id: string;
   value: number;
   onCommit: (value: number) => void;
+  disabled?: boolean;
 }) {
   return (
     <input
@@ -595,11 +883,12 @@ function PercentInput({
       min={0}
       max={100}
       step={0.1}
+      disabled={disabled}
       value={Number((value * 100).toFixed(1))}
       onChange={(event) =>
         onCommit(clamp(Number(event.target.value) / 100 || 0, 0, 1))
       }
-      className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm tabular-nums text-slate-800 focus-visible:border-blue-500 focus-visible:outline-none"
+      className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm tabular-nums text-slate-800 focus-visible:border-blue-500 focus-visible:outline-none disabled:bg-slate-50 disabled:text-slate-400"
     />
   );
 }
@@ -630,11 +919,13 @@ function IconAction({
   label,
   onClick,
   danger,
+  active,
   children,
 }: {
   label: string;
   onClick: () => void;
   danger?: boolean;
+  active?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -643,12 +934,100 @@ function IconAction({
       onClick={onClick}
       title={label}
       aria-label={label}
+      aria-pressed={active}
       className={`grid h-7 w-7 place-items-center rounded-md transition-colors ${
-        danger
-          ? "text-slate-500 hover:bg-red-50 hover:text-red-600"
-          : "text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+        active
+          ? "bg-slate-900 text-white"
+          : danger
+            ? "text-slate-500 hover:bg-red-50 hover:text-red-600"
+            : "text-slate-500 hover:bg-slate-100 hover:text-slate-800"
       }`}
     >
+      {children}
+    </button>
+  );
+}
+
+function ToggleButton({
+  label,
+  active,
+  onClick,
+  children,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      className={`grid h-7 w-8 place-items-center rounded-md border transition-colors ${
+        active
+          ? "border-slate-900 bg-slate-900 text-white"
+          : "border-slate-300 text-slate-500 hover:bg-slate-100"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function TinyButton({
+  label,
+  onClick,
+  wide,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  wide?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`grid h-7 place-items-center rounded-md border border-slate-300 text-slate-600 transition-colors hover:bg-slate-100 ${
+        wide ? "flex-1" : ""
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SmallButton({
+  onClick,
+  disabled,
+  danger,
+  icon,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-700 transition-colors disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:border-slate-300 disabled:hover:bg-transparent ${
+        danger
+          ? "hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+          : "hover:bg-slate-50"
+      }`}
+    >
+      {icon}
       {children}
     </button>
   );

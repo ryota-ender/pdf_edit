@@ -190,3 +190,89 @@ export const LockIcon = (props: IconProps) => (
     <path d="M8 11V8a4 4 0 0 1 8 0v3" />
   </Icon>
 );
+
+export const UnlockIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x={5} y={11} width={14} height={9} rx={2} />
+    <path d="M8 11V8a4 4 0 0 1 7.5-2" />
+  </Icon>
+);
+
+export const BoldIcon = (props: IconProps) => (
+  <Icon {...props} strokeWidth={2}>
+    <path d="M7 5h5.5a3.5 3.5 0 0 1 0 7H7zM7 12h6a3.5 3.5 0 0 1 0 7H7z" />
+  </Icon>
+);
+
+export const ItalicIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M15 5h-5M14 19H9M13 5l-2 14" />
+  </Icon>
+);
+
+export const WrapIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 6h16M4 12h11a3 3 0 0 1 0 6h-3M4 18h3m0 0-2-2m2 2-2 2" />
+  </Icon>
+);
+
+export const BringForwardIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x={4} y={4} width={11} height={11} rx={2} />
+    <path d="M9 20h9a2 2 0 0 0 2-2V9" />
+  </Icon>
+);
+
+export const SendBackwardIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x={9} y={9} width={11} height={11} rx={2} />
+    <path d="M15 4H6a2 2 0 0 0-2 2v9" />
+  </Icon>
+);
+
+export const GroupIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x={4} y={4} width={7} height={7} rx={1} />
+    <rect x={13} y={13} width={7} height={7} rx={1} />
+    <path d="M13 7h4M7 13v4" />
+  </Icon>
+);
+
+export const UngroupIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x={3} y={3} width={7} height={7} rx={1} />
+    <rect x={14} y={14} width={7} height={7} rx={1} />
+    <path d="m11 8 4-4m-4 0 4 4" strokeWidth={1.3} />
+  </Icon>
+);
+
+export const StampIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M9 10V7a3 3 0 0 1 6 0v3M5 14h14v3H5zM7 14l1-4h8l1 4M4 20h16" />
+  </Icon>
+);
+
+export const SearchIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx={11} cy={11} r={6} />
+    <path d="m20 20-4.5-4.5" />
+  </Icon>
+);
+
+export const TextCursorIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M10 5h4M12 5v14M10 19h4M6 8V6a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v2" />
+  </Icon>
+);
+
+export const MergeIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M5 4v5a4 4 0 0 0 4 4h6M19 4v5a4 4 0 0 1-4 4M12 13v7m0 0-3-3m3 3 3-3" />
+  </Icon>
+);
+
+export const CloseIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m6 6 12 12M18 6 6 18" />
+  </Icon>
+);

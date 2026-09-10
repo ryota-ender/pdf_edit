@@ -1,34 +1,48 @@
-import {
-  BlendMode,
-  LineCapStyle,
-  LineJoinStyle,
-  PDFDocument,
-  degrees,
-  popGraphicsState,
-  pushGraphicsState,
-  rgb,
-  setLineJoin,
-} from "pdf-lib";
+import { PDFDocument, degrees } from "pdf-lib";
 import type { PDFFont, PDFImage, PDFPage } from "pdf-lib";
 import { PdfEditorError, translatePdfLibError } from "./errors";
 import { createFontkitAdapter, loadFontkit, loadJapaneseFont } from "./font";
-import { hexToRgb01, normalizeAngle, viewPointToPdfPoint } from "./coordinates";
-import { LINE_HEIGHT_FACTOR, layoutTextBlock } from "./textLayout";
-import type { LoadedFont } from "./font";
+import { normalizeAngle } from "./coordinates";
+import { buildElementOperators, normalizedToPdf } from "./drawElements";
+import type { DrawResources, PageGeometry } from "./drawElements";
+import { AnnotationResources, appendAnnotation } from "./annotations";
+import { elementBoundingRect } from "./geometry";
+import type { FontBook, LoadedFont } from "./font";
+import { createFallbackFont } from "./font";
 import type { ImageAssetStore } from "./imageAssets";
-import type {
-  EditorDoc,
-  EditorElement,
-  PenElement,
-} from "@/types/editor";
+import type { EditorDoc, EditorElement, FontWeight } from "@/types/editor";
+
+/** 読み込み済みの PDF ファイル 1 つ。 */
+export interface PdfSource {
+  id: string;
+  bytes: Uint8Array;
+  fileName: string;
+}
+
+/** 書き出し方。 */
+export type ExportMode = "flatten" | "annotate";
+
+/** ページを画像として取り込むための関数。 */
+export type RasterizePage = (
+  sourceId: string,
+  sourceIndex: number,
+  rotation: number,
+) => Promise<{ bytes: Uint8Array; width: number; height: number }>;
 
 export interface ExportOptions {
-  /** 読み込み時の元 PDF のバイト列。書き換えないこと。 */
-  originalBytes: Uint8Array;
+  sources: PdfSource[];
   doc: EditorDoc;
   images: ImageAssetStore;
-  /** 元のファイル名。出力ファイル名の生成に使う。 */
-  originalFileName?: string;
+  /** 出力ファイル名の元にする名前。 */
+  baseFileName?: string;
+  mode: ExportMode;
+  /** 指定するとそのページだけを書き出す（ページ抽出・分割用）。 */
+  pageIndexes?: number[];
+  /**
+   * pdf-lib が読めないファイル（パスワード保護など）を救済するための関数。
+   * ページを画像として取り込み直す。
+   */
+  rasterizePage?: RasterizePage;
 }
 
 export interface ExportResult {
@@ -36,16 +50,18 @@ export interface ExportResult {
   fileName: string;
   /** サブセット埋め込みに失敗してフォント全体を埋め込んだ場合に true。 */
   usedFullFontEmbed: boolean;
+  /** 画像として取り込み直したページがある場合に true（文字は選択できなくなる）。 */
+  usedRasterFallback: boolean;
 }
 
 /**
- * 元 PDF に編集レイヤーを焼き込んだ新しい PDF を生成する。
+ * 元 PDF に編集レイヤーを載せた新しい PDF を生成する。
  *
- * 座標変換の考え方は coordinates.ts / textLayout.ts を参照。要点は 2 つ。
+ * 座標変換は drawElements.ts / coordinates.ts を参照。要点は 3 つ。
  *   - 要素は正規化座標 (左上原点・Y下向き) で保持しているので、ページ回転を
  *     考慮して PDF ユーザー空間 (左下原点・Y上向き) へ変換する。
- *   - テキストの Y はブロック上端なので、ベースラインまで
- *     `ascentRatio × fontSize` 下げてから変換する。
+ *   - テキストの Y はブロック上端なので、ベースラインまで下げてから変換する。
+ *   - 要素自身の回転は、正規化座標の段階で中心のまわりに回してから変換する。
  */
 export async function exportPdf(options: ExportOptions): Promise<ExportResult> {
   // まずサブセット埋め込みを試す。日本語フォントは 5MB あるため、
@@ -64,77 +80,151 @@ export async function exportPdf(options: ExportOptions): Promise<ExportResult> {
 }
 
 async function buildPdf(
-  { originalBytes, doc, images, originalFileName }: ExportOptions,
+  {
+    sources,
+    doc,
+    images,
+    baseFileName,
+    mode,
+    pageIndexes,
+    rasterizePage,
+  }: ExportOptions,
   { subset }: { subset: boolean },
 ): Promise<ExportResult> {
-  let pdfDoc: PDFDocument;
-  try {
-    pdfDoc = await PDFDocument.load(originalBytes.slice());
-  } catch (error) {
-    throw translatePdfLibError(error);
+  if (sources.length === 0) {
+    throw new PdfEditorError("書き出すPDFが読み込まれていません。");
   }
 
-  // --- ページ構成を組み立てる -------------------------------------
-  const sourceCount = pdfDoc.getPageCount();
-  if (doc.pages.some((page) => page.sourceIndex >= sourceCount)) {
-    throw new PdfEditorError(
-      "ページ構成の解析に失敗したため書き出せませんでした。",
-    );
+  // --- 対象ページを絞る（抽出・分割） ------------------------------
+  const selected = pageIndexes ?? doc.pages.map((_, index) => index);
+  const pageStates = selected.map((index) => doc.pages[index]);
+  if (pageStates.some((page) => page === undefined)) {
+    throw new PdfEditorError("指定されたページが見つかりませんでした。");
   }
 
-  // 並び順も枚数も元のままなら、読み込んだ文書をそのまま使う。
-  // しおり・文書情報・フォームなど、ページ以外の要素を保てるため。
+  // --- 元ファイルを読み込む ----------------------------------------
+  // パスワード保護された PDF は pdf-lib では開けない。その場合は
+  // 表示に使っている pdf.js でページを画像へ起こし、そこへ編集を載せる。
+  // 文字は選択できなくなるが、書き出せないよりは使える。
+  const loadedSources = new Map<string, PDFDocument>();
+  const rasterSources = new Set<string>();
+
+  for (const source of sources) {
+    try {
+      loadedSources.set(source.id, await PDFDocument.load(source.bytes.slice()));
+    } catch (error) {
+      if (!rasterizePage) throw translatePdfLibError(error);
+      rasterSources.add(source.id);
+    }
+  }
+
+  // --- 出力する文書を組み立てる ------------------------------------
+  // 1 ファイルのまま、順序も枚数も変わっていないなら、読み込んだ文書を
+  // そのまま使う。しおり・文書情報・フォームなどページ以外の要素を
+  // 保てるため。それ以外はページを複製して組み直す。
+  const onlySource =
+    sources.length === 1 && rasterSources.size === 0
+      ? loadedSources.get(sources[0].id)
+      : null;
   const isUnchanged =
-    doc.pages.length === sourceCount &&
-    doc.pages.every((page, index) => page.sourceIndex === index);
+    onlySource !== null &&
+    onlySource !== undefined &&
+    pageStates.length === onlySource.getPageCount() &&
+    pageStates.every(
+      (page, index) =>
+        page.sourceIndex === index && page.sourceId === sources[0].id,
+    );
 
+  let pdfDoc: PDFDocument;
   let pages: PDFPage[];
 
-  if (isUnchanged) {
+  if (isUnchanged && onlySource) {
+    pdfDoc = onlySource;
     pages = pdfDoc.getPages();
   } else {
-    // 削除・並べ替え・複製が入っている場合は、必要なページだけを
-    // 新しい文書へ順番に複製する。同じページ番号を 2 回指定すれば
-    // そのまま複製になる。
-    const rebuilt = await PDFDocument.create();
-    const copied = await rebuilt.copyPages(
-      pdfDoc,
-      doc.pages.map((page) => page.sourceIndex),
-    );
-    for (const page of copied) rebuilt.addPage(page);
+    pdfDoc = await PDFDocument.create();
 
-    copyDocumentInfo(pdfDoc, rebuilt);
-    pdfDoc = rebuilt;
+    for (const state of pageStates) {
+      // 画像として取り込むファイルのページ。
+      if (rasterSources.has(state.sourceId)) {
+        const sourceInfo = sources.find((item) => item.id === state.sourceId);
+        const baseRotation = 0;
+        const raster = await (rasterizePage as RasterizePage)(
+          state.sourceId,
+          state.sourceIndex,
+          baseRotation + state.rotation,
+        );
+        const image = await pdfDoc.embedPng(raster.bytes);
+        const page = pdfDoc.addPage([raster.width, raster.height]);
+        page.drawImage(image, {
+          x: 0,
+          y: 0,
+          width: raster.width,
+          height: raster.height,
+        });
+        void sourceInfo;
+        continue;
+      }
+
+      const source = loadedSources.get(state.sourceId);
+      if (!source) {
+        throw new PdfEditorError("ページの元ファイルが見つかりませんでした。");
+      }
+      if (state.sourceIndex >= source.getPageCount()) {
+        throw new PdfEditorError(
+          "ページ構成の解析に失敗したため書き出せませんでした。",
+        );
+      }
+      const [copied] = await pdfDoc.copyPages(source, [state.sourceIndex]);
+      pdfDoc.addPage(copied);
+    }
+
+    const first = loadedSources.get(sources[0].id);
+    if (first) copyDocumentInfo(first, pdfDoc);
     pages = pdfDoc.getPages();
   }
 
-  // --- 回転を確定させる -------------------------------------------
+  // --- 回転を確定させる --------------------------------------------
   // 元の /Rotate に、エディタ上で加えた回転を足したものが最終的な向き。
   // 要素の正規化座標は「最終的な向きで表示したページ」を基準にしている
   // ので、描画位置の計算にも同じ角度を使う。
   const finalRotations = pages.map((page, index) => {
+    // 画像として取り込んだページは、回転を焼き込み済みなので触らない。
+    if (rasterSources.has(pageStates[index].sourceId)) return 0;
+
     const rotation = normalizeAngle(
-      page.getRotation().angle + doc.pages[index].rotation,
+      page.getRotation().angle + pageStates[index].rotation,
     );
     page.setRotation(degrees(rotation));
     return rotation;
   });
 
-  // --- 描く要素を集める -------------------------------------------
-  const drawable = doc.elements.filter(
-    (element) =>
-      element.pageIndex < pages.length &&
-      (element.type !== "text" || element.text.length > 0),
-  );
+  // --- 描く要素を集める --------------------------------------------
+  // 選択したページだけを書き出す場合に備え、ページ番号を振り直す。
+  const pageIndexMap = new Map(selected.map((original, next) => [original, next]));
 
-  const needsFont = drawable.some((element) => element.type === "text");
-  const usedFullFontEmbed = !subset && needsFont;
+  const drawable = doc.elements
+    .filter(
+      (element) =>
+        pageIndexMap.has(element.pageIndex) &&
+        (element.type !== "text" || element.text.length > 0),
+    )
+    .map((element) => ({
+      element,
+      pageIndex: pageIndexMap.get(element.pageIndex) as number,
+    }));
 
-  let font: LoadedFont | null = null;
-  let embeddedFont: PDFFont | null = null;
+  // --- フォントを用意する ------------------------------------------
+  const usedWeights = new Set<FontWeight>();
+  for (const { element } of drawable) {
+    if (element.type === "text") usedWeights.add(element.fontWeight);
+  }
 
-  if (needsFont) {
-    font = await loadJapaneseFont();
+  const measured = new Map<FontWeight, LoadedFont>();
+  const embeddedFonts = new Map<FontWeight, PDFFont>();
+  const usedFullFontEmbed = !subset && usedWeights.size > 0;
+
+  if (usedWeights.size > 0) {
     const fontkit = subset
       ? createFontkitAdapter(await loadFontkit())
       : (await import("@pdf-lib/fontkit")).default;
@@ -145,164 +235,66 @@ async function buildPdf(
       fontkit as Parameters<typeof pdfDoc.registerFontkit>[0],
     );
 
-    try {
-      embeddedFont = await pdfDoc.embedFont(font.cloneBytes(), { subset });
-    } catch (error) {
-      if (!subset) {
-        throw new PdfEditorError(
-          "日本語フォントの埋め込みに失敗したため書き出せませんでした。",
-          { cause: error },
+    for (const weight of usedWeights) {
+      const font = await loadJapaneseFont(weight);
+      measured.set(weight, font);
+      try {
+        embeddedFonts.set(
+          weight,
+          await pdfDoc.embedFont(font.cloneBytes(), { subset }),
         );
+      } catch (error) {
+        if (!subset) {
+          throw new PdfEditorError(
+            "日本語フォントの埋め込みに失敗したため書き出せませんでした。",
+            { cause: error },
+          );
+        }
+        throw error; // 呼び出し元がフォント全体埋め込みで再試行する。
       }
-      throw error; // 呼び出し元がフォント全体埋め込みで再試行する。
     }
   }
 
+  const fallback = createFallbackFont();
+  const fonts: FontBook = {
+    get: (weight) => measured.get(weight) ?? fallback,
+    loaded: () => [...measured.values()],
+  };
+
   // 同じ画像を何度も埋め込まないようキャッシュする。
   const embeddedImages = new Map<string, PDFImage>();
+  for (const { element } of drawable) {
+    if (element.type !== "image" || embeddedImages.has(element.assetId)) continue;
+    const asset = images.get(element.assetId);
+    if (!asset) continue;
+    embeddedImages.set(
+      element.assetId,
+      asset.format === "png"
+        ? await pdfDoc.embedPng(asset.bytes.slice())
+        : await pdfDoc.embedJpg(asset.bytes.slice()),
+    );
+  }
 
-  for (const element of drawable) {
-    const page = pages[element.pageIndex];
-    const rotation = finalRotations[element.pageIndex];
+  // --- 描画 ---------------------------------------------------------
+  for (const { element, pageIndex } of drawable) {
+    const page = pages[pageIndex];
+    const rotation = finalRotations[pageIndex];
     const cropBox = page.getCropBox();
-
-    // 回転を適用した「表示中のページ」の寸法。正規化座標の基準。
     const swapped = rotation % 180 === 90;
-    const view = {
-      width: swapped ? cropBox.height : cropBox.width,
-      height: swapped ? cropBox.width : cropBox.height,
+
+    const geo: PageGeometry = {
+      cropBox,
+      rotation,
+      view: {
+        width: swapped ? cropBox.height : cropBox.width,
+        height: swapped ? cropBox.width : cropBox.height,
+      },
     };
 
-    /** 正規化座標 → PDF ユーザー空間。 */
-    const toPdf = (nx: number, ny: number) =>
-      viewPointToPdfPoint(nx * view.width, ny * view.height, cropBox, rotation);
-
-    switch (element.type) {
-      case "text":
-        if (embeddedFont && font) {
-          drawTextElement(page, element, view, cropBox, rotation, font, embeddedFont);
-        }
-        break;
-
-      case "highlight": {
-        const box = toPdfRect(element, view, cropBox, rotation);
-        const { r, g, b } = hexToRgb01(element.color);
-        page.drawRectangle({
-          ...box,
-          color: rgb(r, g, b),
-          opacity: element.opacity,
-          // 乗算合成にすると、下にある文字が透けて本物の蛍光ペンに見える。
-          blendMode: BlendMode.Multiply,
-        });
-        break;
-      }
-
-      case "rect": {
-        const box = toPdfRect(element, view, cropBox, rotation);
-        const fill = element.fill ? hexToRgb01(element.fill) : null;
-        const stroke = element.stroke ? hexToRgb01(element.stroke) : null;
-        page.drawRectangle({
-          ...box,
-          color: fill ? rgb(fill.r, fill.g, fill.b) : undefined,
-          opacity: fill ? element.opacity : undefined,
-          borderColor: stroke ? rgb(stroke.r, stroke.g, stroke.b) : undefined,
-          borderWidth: stroke ? element.strokeWidth : 0,
-          borderOpacity: stroke ? element.opacity : undefined,
-        });
-        break;
-      }
-
-      case "ellipse": {
-        const box = toPdfRect(element, view, cropBox, rotation);
-        const fill = element.fill ? hexToRgb01(element.fill) : null;
-        const stroke = element.stroke ? hexToRgb01(element.stroke) : null;
-        page.drawEllipse({
-          // pdf-lib の楕円は中心指定。
-          x: box.x + box.width / 2,
-          y: box.y + box.height / 2,
-          xScale: box.width / 2,
-          yScale: box.height / 2,
-          color: fill ? rgb(fill.r, fill.g, fill.b) : undefined,
-          opacity: fill ? element.opacity : undefined,
-          borderColor: stroke ? rgb(stroke.r, stroke.g, stroke.b) : undefined,
-          borderWidth: stroke ? element.strokeWidth : 0,
-          borderOpacity: stroke ? element.opacity : undefined,
-        });
-        break;
-      }
-
-      case "arrow": {
-        const start = toPdf(element.x1, element.y1);
-        const end = toPdf(element.x2, element.y2);
-        const { r, g, b } = hexToRgb01(element.color);
-        const color = rgb(r, g, b);
-
-        page.drawLine({
-          start,
-          end,
-          thickness: element.strokeWidth,
-          color,
-          opacity: element.opacity,
-          lineCap: LineCapStyle.Round,
-        });
-
-        if (element.head) {
-          page.drawSvgPath(arrowHeadPath(start, end, element.strokeWidth), {
-            x: 0,
-            y: 0,
-            scale: 1,
-            color,
-            opacity: element.opacity,
-          });
-        }
-        break;
-      }
-
-      case "pen": {
-        const path = penPath(element, toPdf);
-        if (!path) break;
-        const { r, g, b } = hexToRgb01(element.color);
-
-        // drawSvgPath は線の結合方法を指定できず、既定のマイター結合だと
-        // 折れ角の外側に鋭い突起が出てしまう。プレビュー (SVG の
-        // stroke-linejoin="round") と揃えるため、外側で丸い結合を指定する。
-        page.pushOperators(pushGraphicsState(), setLineJoin(LineJoinStyle.Round));
-        page.drawSvgPath(path, {
-          x: 0,
-          y: 0,
-          scale: 1,
-          borderColor: rgb(r, g, b),
-          borderWidth: element.strokeWidth,
-          borderOpacity: element.opacity,
-          borderLineCap: LineCapStyle.Round,
-        });
-        page.pushOperators(popGraphicsState());
-        break;
-      }
-
-      case "image": {
-        const asset = images.get(element.assetId);
-        if (!asset) break;
-
-        let image = embeddedImages.get(element.assetId);
-        if (!image) {
-          image =
-            asset.format === "png"
-              ? await pdfDoc.embedPng(asset.bytes.slice())
-              : await pdfDoc.embedJpg(asset.bytes.slice());
-          embeddedImages.set(element.assetId, image);
-        }
-
-        const box = toPdfRect(element, view, cropBox, rotation);
-        page.drawImage(image, {
-          ...box,
-          opacity: element.opacity,
-          // ページが回転していても画像が正しい向きで載るようにする。
-          rotate: degrees(rotation),
-          ...imageRotationOffset(box, rotation),
-        });
-        break;
-      }
+    if (mode === "annotate") {
+      drawAsAnnotation(pdfDoc, page, element, geo, fonts, embeddedFonts, embeddedImages);
+    } else {
+      drawIntoPage(page, element, geo, fonts, embeddedFonts, embeddedImages);
     }
   }
 
@@ -320,160 +312,135 @@ async function buildPdf(
 
   return {
     blob: new Blob([buffer], { type: "application/pdf" }),
-    fileName: buildFileName(originalFileName),
+    fileName: buildFileName(baseFileName),
     usedFullFontEmbed,
+    usedRasterFallback: rasterSources.size > 0,
   };
 }
 
 // ---------------------------------------------------------------------------
-// 個別の描画
+// 描画（ページ本体 / 注釈）
 // ---------------------------------------------------------------------------
 
-type Box = { x: number; y: number; width: number; height: number };
-
-function drawTextElement(
+function drawIntoPage(
   page: PDFPage,
-  element: Extract<EditorElement, { type: "text" }>,
-  view: { width: number; height: number },
-  cropBox: Box,
-  rotation: number,
-  font: LoadedFont,
-  embeddedFont: PDFFont,
+  element: EditorElement,
+  geo: PageGeometry,
+  fonts: FontBook,
+  embeddedFonts: Map<FontWeight, PDFFont>,
+  embeddedImages: Map<string, PDFImage>,
 ): void {
-  const layout = layoutTextBlock(element.text, element.fontSize, font);
-  const { r, g, b } = hexToRgb01(element.color);
+  const resources: DrawResources = {
+    geo,
+    fonts,
+    graphicsState: (options) =>
+      page.node.newExtGState(
+        "GS",
+        page.doc.context.obj({
+          Type: "ExtGState",
+          ca: options.opacity,
+          CA: options.borderOpacity,
+          BM: options.blendMode,
+        }),
+      ),
+    font: (weight) => {
+      const font = embeddedFonts.get(weight);
+      if (!font) throw new PdfEditorError("フォントが用意できていません。");
+      return { font, name: page.node.newFontDictionary("F", font.ref) };
+    },
+    image: (assetId) => {
+      const image = embeddedImages.get(assetId);
+      if (!image) return undefined;
+      return {
+        name: page.node.newXObject("Image", image.ref),
+        width: image.width,
+        height: image.height,
+      };
+    },
+  };
 
-  // 行揃えは行ごとに開始位置をずらして表現する。pdf-lib には
-  // 行揃えの概念がないため、こちらで各行の左端を決める。
-  layout.lines.forEach((line, index) => {
-    if (line.length === 0) return;
-
-    const lineWidth = font.measureText(line, element.fontSize);
-    const offset =
-      element.align === "center"
-        ? (layout.width - lineWidth) / 2
-        : element.align === "right"
-          ? layout.width - lineWidth
-          : 0;
-
-    const baselineViewX = element.x * view.width + offset;
-    const baselineViewY =
-      element.y * view.height + layout.baselineOffsets[index];
-
-    const origin = viewPointToPdfPoint(
-      baselineViewX,
-      baselineViewY,
-      cropBox,
-      rotation,
-    );
-
-    page.drawText(line, {
-      x: origin.x,
-      y: origin.y,
-      size: element.fontSize,
-      font: embeddedFont,
-      color: rgb(r, g, b),
-      opacity: element.opacity,
-      lineHeight: LINE_HEIGHT_FACTOR * element.fontSize,
-      // pdf-lib の rotate は反時計回り、ページの /Rotate は時計回りで、
-      // ちょうど打ち消し合う関係になる。
-      rotate: degrees(rotation),
-    });
-  });
+  const operators = buildElementOperators(element, resources);
+  if (operators.length > 0) page.pushOperators(...operators);
 }
 
-/**
- * 正規化矩形を PDF ユーザー空間の軸平行な矩形へ変換する。
- * ページ回転は 90 度単位なので、4 隅を変換して外接矩形を取れば足りる。
- */
-function toPdfRect(
-  element: { x: number; y: number; w: number; h: number },
-  view: { width: number; height: number },
-  cropBox: Box,
-  rotation: number,
-): Box {
-  const corners = [
-    [element.x, element.y],
-    [element.x + element.w, element.y],
-    [element.x + element.w, element.y + element.h],
-    [element.x, element.y + element.h],
-  ].map(([nx, ny]) =>
-    viewPointToPdfPoint(nx * view.width, ny * view.height, cropBox, rotation),
-  );
+function drawAsAnnotation(
+  pdfDoc: PDFDocument,
+  page: PDFPage,
+  element: EditorElement,
+  geo: PageGeometry,
+  fonts: FontBook,
+  embeddedFonts: Map<FontWeight, PDFFont>,
+  embeddedImages: Map<string, PDFImage>,
+): void {
+  const annotationResources = new AnnotationResources(pdfDoc);
 
+  const resources: DrawResources = {
+    geo,
+    fonts,
+    graphicsState: (options) =>
+      annotationResources.addExtGState({
+        Type: "ExtGState",
+        ca: options.opacity,
+        CA: options.borderOpacity,
+        BM: options.blendMode,
+      }),
+    font: (weight) => {
+      const font = embeddedFonts.get(weight);
+      if (!font) throw new PdfEditorError("フォントが用意できていません。");
+      return { font, name: annotationResources.addFont(font.ref) };
+    },
+    image: (assetId) => {
+      const image = embeddedImages.get(assetId);
+      if (!image) return undefined;
+      return {
+        name: annotationResources.addXObject(image.ref),
+        width: image.width,
+        height: image.height,
+      };
+    },
+  };
+
+  const operators = buildElementOperators(element, resources);
+  if (operators.length === 0) return;
+
+  appendAnnotation(
+    pdfDoc,
+    page,
+    element,
+    geo,
+    operators,
+    annotationBox(element, geo, fonts),
+    annotationResources,
+  );
+}
+
+/** 注釈の矩形。線幅のはみ出しぶんだけ余裕を持たせる。 */
+function annotationBox(
+  element: EditorElement,
+  geo: PageGeometry,
+  fonts: FontBook,
+) {
+  const rect = elementBoundingRect(element, { view: geo.view, fonts });
+
+  const strokeWidth =
+    "strokeWidth" in element ? (element.strokeWidth as number) : 0;
+  const padding = Math.max(strokeWidth * 2, 2);
+
+  const corners = [
+    normalizedToPdf(geo, rect.x, rect.y),
+    normalizedToPdf(geo, rect.x + rect.w, rect.y),
+    normalizedToPdf(geo, rect.x + rect.w, rect.y + rect.h),
+    normalizedToPdf(geo, rect.x, rect.y + rect.h),
+  ];
   const xs = corners.map((point) => point.x);
   const ys = corners.map((point) => point.y);
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
 
   return {
-    x,
-    y,
-    width: Math.max(...xs) - x,
-    height: Math.max(...ys) - y,
+    x0: Math.min(...xs) - padding,
+    y0: Math.min(...ys) - padding,
+    x1: Math.max(...xs) + padding,
+    y1: Math.max(...ys) + padding,
   };
-}
-
-/**
- * `drawImage` の rotate は左下を軸に反時計回りで回すため、回転後の位置が
- * ずれる。回した結果が元の矩形に重なるよう、描画原点を補正する。
- */
-function imageRotationOffset(box: Box, rotation: number): Partial<Box> {
-  switch (normalizeAngle(rotation)) {
-    case 90:
-      return { x: box.x + box.width, width: box.height, height: box.width };
-    case 180:
-      return { x: box.x + box.width, y: box.y + box.height };
-    case 270:
-      return { y: box.y + box.height, width: box.height, height: box.width };
-    default:
-      return {};
-  }
-}
-
-/**
- * SVG パス文字列を組み立てる。
- *
- * pdf-lib の `drawSvgPath` は translate(x,y) → rotate → scale(1,-1) を適用する。
- * つまり x=0, y=0, scale=1 で呼べば、パス上の点 (px, py) は PDF 座標
- * (px, -py) に落ちる。よって「PDF 座標に変換済みの点の Y を反転して」
- * 書き出せば、回転を含めて自前の変換結果をそのまま使える。
- */
-function penPath(
-  element: PenElement,
-  toPdf: (nx: number, ny: number) => { x: number; y: number },
-): string | null {
-  if (element.points.length < 2) return null;
-
-  return element.points
-    .map((point, index) => {
-      const pdfPoint = toPdf(point.x, point.y);
-      const command = index === 0 ? "M" : "L";
-      return `${command} ${pdfPoint.x.toFixed(2)} ${(-pdfPoint.y).toFixed(2)}`;
-    })
-    .join(" ");
-}
-
-function arrowHeadPath(
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-  strokeWidth: number,
-): string {
-  const angle = Math.atan2(end.y - start.y, end.x - start.x);
-  const length = Math.max(6, strokeWidth * 3.5);
-  const halfWidth = Math.max(3, strokeWidth * 2);
-
-  const left = {
-    x: end.x - length * Math.cos(angle) + halfWidth * Math.sin(angle),
-    y: end.y - length * Math.sin(angle) - halfWidth * Math.cos(angle),
-  };
-  const right = {
-    x: end.x - length * Math.cos(angle) - halfWidth * Math.sin(angle),
-    y: end.y - length * Math.sin(angle) + halfWidth * Math.cos(angle),
-  };
-
-  // penPath と同じ理由で Y を反転する。
-  return `M ${end.x} ${-end.y} L ${left.x} ${-left.y} L ${right.x} ${-right.y} Z`;
 }
 
 /**

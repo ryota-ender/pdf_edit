@@ -59,6 +59,25 @@ export class ImageAssetStore {
     return asset;
   }
 
+  /** 自動保存から復元した画像を、そのままの id で登録し直す。 */
+  restore(stored: {
+    id: string;
+    format: "png" | "jpg";
+    width: number;
+    height: number;
+    bytes: Uint8Array;
+  }): ImageAsset {
+    const existing = this.assets.get(stored.id);
+    if (existing) return existing;
+
+    const objectUrl = URL.createObjectURL(
+      new Blob([stored.bytes.slice()], { type: `image/${stored.format}` }),
+    );
+    const asset: ImageAsset = { ...stored, objectUrl };
+    this.assets.set(asset.id, asset);
+    return asset;
+  }
+
   /** すべての Blob URL を解放する。 */
   dispose(): void {
     for (const asset of this.assets.values()) {

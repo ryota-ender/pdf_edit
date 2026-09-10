@@ -1,50 +1,65 @@
 "use client";
 
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import { useState } from "react";
 import { PageThumbnail } from "./PageThumbnail";
-import { ChevronDownIcon, ChevronUpIcon, DuplicateIcon, RotateIcon, TrashIcon } from "./Icons";
-import type { PageSize, PageState } from "@/types/editor";
+import {
+  ChevronDownIcon,
+  ChevronUpIcon,
+  DuplicateIcon,
+  RotateIcon,
+  TrashIcon,
+} from "./Icons";
+import type { LoadedSource } from "@/hooks/usePdfDocument";
+import type { PageState } from "@/types/editor";
+
+export interface PageViewInfo {
+  source: LoadedSource;
+  rotation: number;
+  width: number;
+  height: number;
+}
 
 interface PageRailProps {
-  doc: PDFDocumentProxy;
   pages: PageState[];
-  /** 元 PDF のページ寸法（sourceIndex で引く）。 */
-  sizes: PageSize[];
-  /** 元 PDF のページ回転（sourceIndex で引く）。 */
-  baseRotations: number[];
+  /** 各ページの元ファイル・最終回転角・表示寸法。 */
+  pageViews: (PageViewInfo | null)[];
   currentPage: number;
   onSelectPage: (index: number) => void;
   onRotatePage: (index: number) => void;
   onDeletePage: (index: number) => void;
   onDuplicatePage: (index: number) => void;
   onMovePage: (index: number, direction: -1 | 1) => void;
+  onReorderPages: (from: number, to: number) => void;
   /** 各ページに載っている編集要素の数。 */
   elementCounts: number[];
 }
 
-/** 左側のページ一覧。クリックでそのページへ飛び、各種ページ操作もここから。 */
+/**
+ * 左側のページ一覧。
+ * クリックでそのページへ飛び、ドラッグで並べ替えられる。
+ */
 export function PageRail({
-  doc,
   pages,
-  sizes,
-  baseRotations,
+  pageViews,
   currentPage,
   onSelectPage,
   onRotatePage,
   onDeletePage,
   onDuplicatePage,
   onMovePage,
+  onReorderPages,
   elementCounts,
 }: PageRailProps) {
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+
   return (
     <aside className="flex w-48 shrink-0 flex-col border-r border-slate-200 bg-slate-50">
       <div className="flex h-9 shrink-0 items-center justify-between px-3">
         <span className="text-xs font-semibold tracking-wide text-slate-500">
           ページ
         </span>
-        <span className="text-xs tabular-nums text-slate-400">
-          {pages.length}
-        </span>
+        <span className="text-xs tabular-nums text-slate-400">{pages.length}</span>
       </div>
 
       <div
@@ -53,11 +68,43 @@ export function PageRail({
       >
         {pages.map((page, index) => {
           const isActive = index === currentPage;
+          const view = pageViews[index];
+          const isDropTarget = dropIndex === index && draggingIndex !== index;
+
           return (
             <div
-              key={`${page.sourceIndex}-${index}`}
+              key={`${page.sourceId}-${page.sourceIndex}-${index}`}
+              draggable
+              onDragStart={(event) => {
+                setDraggingIndex(index);
+                event.dataTransfer.effectAllowed = "move";
+                // Firefox はデータが空だとドラッグを開始しない。
+                event.dataTransfer.setData("text/plain", String(index));
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDropIndex(index);
+              }}
+              onDragLeave={() => {
+                setDropIndex((current) => (current === index ? null : current));
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (draggingIndex !== null && draggingIndex !== index) {
+                  onReorderPages(draggingIndex, index);
+                }
+                setDraggingIndex(null);
+                setDropIndex(null);
+              }}
+              onDragEnd={() => {
+                setDraggingIndex(null);
+                setDropIndex(null);
+              }}
               className={`group rounded-lg p-1.5 transition-colors ${
                 isActive ? "bg-blue-50" : "hover:bg-slate-100"
+              } ${draggingIndex === index ? "opacity-40" : ""} ${
+                isDropTarget ? "ring-2 ring-blue-400" : ""
               }`}
             >
               <button
@@ -71,12 +118,14 @@ export function PageRail({
                 }`}
               >
                 <span className="sr-only">{index + 1}ページ目を表示</span>
-                <PageThumbnail
-                  doc={doc}
-                  sourceIndex={page.sourceIndex}
-                  size={sizes[page.sourceIndex]}
-                  rotation={baseRotations[page.sourceIndex] + page.rotation}
-                />
+                {view && (
+                  <PageThumbnail
+                    doc={view.source.doc}
+                    sourceIndex={page.sourceIndex}
+                    size={view.source.sizes[page.sourceIndex]}
+                    rotation={view.rotation}
+                  />
+                )}
               </button>
 
               <div className="mt-1 flex items-center justify-between gap-1 px-0.5">

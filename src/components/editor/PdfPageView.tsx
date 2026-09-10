@@ -1,57 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { renderPageToCanvas } from "@/lib/pdf/renderPdf";
 import { CSS_PX_PER_POINT } from "@/lib/pdf/coordinates";
-import { MAX_FONT_SIZE, MIN_FONT_SIZE } from "@/lib/pdf/textLayout";
-import {
-  applyResize,
-  clampTranslation,
-  elementRect,
-  normalizeRect,
-  rectsIntersect,
-  resizeRect,
-  translateElement,
-  unionRect,
-} from "@/lib/pdf/geometry";
-import type { HandleId } from "@/lib/pdf/geometry";
-import {
-  createDrawElement,
-  createTextElement,
-  isDegenerate,
-  updateDrawElement,
-} from "@/lib/pdf/elementDefaults";
+import { elementRect, rectCenter } from "@/lib/pdf/geometry";
+import { usePageInteraction } from "@/hooks/usePageInteraction";
+import type { PageActions } from "@/hooks/usePageInteraction";
 import type { StyleDefaults } from "@/lib/pdf/elementDefaults";
-import { ElementView } from "./ElementView";
+import { ElementView, elementCenter, penPathData } from "./ElementView";
 import { SelectionLayer } from "./SelectionLayer";
 import { InlineTextEditor } from "./InlineTextEditor";
-import type { LoadedFont } from "@/lib/pdf/font";
+import type { FontBook } from "@/lib/pdf/font";
 import type { ImageAssetStore } from "@/lib/pdf/imageAssets";
 import type {
   EditorElement,
   NormalizedRect,
   ToolId,
 } from "@/types/editor";
-import { DRAW_TOOLS } from "@/types/editor";
-
-/** 親（PdfEditor）が用意する操作。ページ側は状態を持たず、これを呼ぶだけ。 */
-export interface PageActions {
-  beginTransaction: () => void;
-  endTransaction: () => void;
-  updateElements: (
-    updater: (elements: EditorElement[]) => EditorElement[],
-    transient: boolean,
-  ) => void;
-  addElement: (element: EditorElement, transient: boolean) => void;
-  removeElement: (id: string) => void;
-  setSelection: (ids: string[]) => void;
-  startEditing: (id: string) => void;
-  previewText: (id: string, text: string) => void;
-  finishEdit: (id: string, text: string) => void;
-  requestImage: (pageIndex: number, x: number, y: number) => void;
-  onRenderError: (message: string) => void;
-}
 
 interface PdfPageViewProps {
   doc: PDFDocumentProxy;
@@ -67,46 +33,17 @@ interface PdfPageViewProps {
   editingId: string | null;
   tool: ToolId;
   style: StyleDefaults;
-  font: LoadedFont;
+  fonts: FontBook;
   images: ImageAssetStore;
   actions: PageActions;
+  snapEnabled: boolean;
+  /** 検索でヒットした箇所（このページ分）。 */
+  searchRects: NormalizedRect[];
+  activeSearchRects: NormalizedRect[];
+  onPreviewText: (id: string, text: string) => void;
+  onFinishEdit: (id: string, text: string) => void;
+  onRenderError: (message: string) => void;
 }
-
-type Interaction =
-  | { kind: "idle" }
-  | {
-      kind: "marquee";
-      pointerId: number;
-      startX: number;
-      startY: number;
-      additive: boolean;
-      baseSelection: string[];
-    }
-  | {
-      kind: "move";
-      pointerId: number;
-      startX: number;
-      startY: number;
-      ids: string[];
-      originals: Map<string, EditorElement>;
-      unionBefore: NormalizedRect;
-      moved: boolean;
-    }
-  | {
-      kind: "resize";
-      pointerId: number;
-      handle: HandleId;
-      id: string;
-      original: EditorElement;
-      rectBefore: NormalizedRect;
-    }
-  | {
-      kind: "draw";
-      pointerId: number;
-      id: string;
-      startX: number;
-      startY: number;
-    };
 
 /** 掴みやすさのため、細い線には見た目より太い当たり判定を与える。 */
 const HIT_PADDING_PX = 10;
@@ -123,45 +60,71 @@ export function PdfPageView({
   editingId,
   tool,
   style,
-  font,
+  fonts,
   images,
   actions,
+  snapEnabled,
+  searchRects,
+  activeSearchRects,
+  onPreviewText,
+  onFinishEdit,
+  onRenderError,
 }: PdfPageViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const interactionRef = useRef<Interaction>({ kind: "idle" });
 
   const [isVisible, setIsVisible] = useState(false);
   const [hasRendered, setHasRendered] = useState(false);
-  const [marquee, setMarquee] = useState<NormalizedRect | null>(null);
 
   const cssPxPerPoint = zoom * CSS_PX_PER_POINT;
   const widthPx = view.width * cssPxPerPoint;
   const heightPx = view.height * cssPxPerPoint;
 
-  // --- 画面に入ったページだけ描画する（連続スクロール用） ------------
+  const interaction = usePageInteraction({
+    pageIndex,
+    view,
+    cssPxPerPoint,
+    elements,
+    selectedIds,
+    tool,
+    style,
+    fonts,
+    actions,
+    svgRef,
+    snapEnabled,
+  });
+
+  // --- 画面に入っているページだけ描画し、離れたら解放する -------------
+  // ページ数の多い PDF でも、キャンバスのメモリが際限なく増えない。
   useEffect(() => {
     const element = containerRef.current;
-    if (!element || isVisible) return;
+    if (!element) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setIsVisible(true);
-          observer.disconnect();
-        }
+        const entry = entries.at(-1);
+        if (!entry) return;
+        setIsVisible(entry.isIntersecting);
       },
-      { rootMargin: "600px 0px" },
+      { rootMargin: "800px 0px" },
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, [isVisible]);
+  }, []);
 
-  const { onRenderError } = actions;
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!isVisible || !canvas) return;
+    if (!canvas) return;
+
+    if (!isVisible) {
+      // 画面から遠ざかったらバッキングストアを手放す。
+      // state の更新は次のフレームに回し、描画中の再入を避ける。
+      canvas.width = 0;
+      canvas.height = 0;
+      const frame = requestAnimationFrame(() => setHasRendered(false));
+      return () => cancelAnimationFrame(frame);
+    }
 
     const render = renderPageToCanvas(doc, {
       canvas,
@@ -186,306 +149,19 @@ export function PdfPageView({
     return render.cancel;
   }, [doc, sourceIndex, rotation, cssPxPerPoint, isVisible, onRenderError]);
 
-  // --- 座標変換 ------------------------------------------------------
-  const toNormalized = useCallback(
-    (event: { clientX: number; clientY: number }) => {
-      const svg = svgRef.current;
-      if (!svg) return { x: 0, y: 0 };
-      const rect = svg.getBoundingClientRect();
-      return {
-        x: (event.clientX - rect.left) / rect.width,
-        y: (event.clientY - rect.top) / rect.height,
-      };
-    },
-    [],
-  );
-
-  const rectOf = useCallback(
-    (element: EditorElement) => elementRect(element, view, font),
-    [view, font],
-  );
-
-  // --- 背景（＝ページの余白）でのポインタ操作 --------------------------
-  const handleBackgroundPointerDown = (event: React.PointerEvent) => {
-    if (event.button !== 0) return;
-    const point = toNormalized(event);
-
-    if (tool === "text") {
-      // 既定のフォーカス移動を止める。これを許すと、直後に生成した
-      // 入力欄からフォーカスが奪われて編集が即終了してしまう。
-      event.preventDefault();
-      const element = createTextElement(pageIndex, point.x, point.y, style);
-      actions.addElement(element, false);
-      actions.setSelection([element.id]);
-      actions.startEditing(element.id);
-      return;
-    }
-
-    if (tool === "image") {
-      actions.requestImage(pageIndex, point.x, point.y);
-      return;
-    }
-
-    if ((DRAW_TOOLS as readonly string[]).includes(tool)) {
-      event.preventDefault();
-      const element = createDrawElement(
-        tool as (typeof DRAW_TOOLS)[number],
-        pageIndex,
-        point.x,
-        point.y,
-        style,
-      );
-      actions.beginTransaction();
-      actions.addElement(element, true);
-      actions.setSelection([]);
-      interactionRef.current = {
-        kind: "draw",
-        pointerId: event.pointerId,
-        id: element.id,
-        startX: point.x,
-        startY: point.y,
-      };
-      event.currentTarget.setPointerCapture(event.pointerId);
-      return;
-    }
-
-    // 選択ツール: 範囲選択を始める。
-    if (!event.shiftKey) actions.setSelection([]);
-    interactionRef.current = {
-      kind: "marquee",
-      pointerId: event.pointerId,
-      startX: point.x,
-      startY: point.y,
-      additive: event.shiftKey,
-      baseSelection: event.shiftKey ? selectedIds : [],
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-
-  // --- 要素の掴み -----------------------------------------------------
-  const handleElementPointerDown = (
-    event: React.PointerEvent,
-    element: EditorElement,
-  ) => {
-    event.stopPropagation();
-    if (event.button !== 0) return;
-    if (tool !== "select") {
-      // 描画ツール中は要素の上からでも描き始められるようにする。
-      handleBackgroundPointerDown(event);
-      return;
-    }
-
-    const isSelected = selectedIds.includes(element.id);
-    let nextSelection: string[];
-
-    if (event.shiftKey) {
-      nextSelection = isSelected
-        ? selectedIds.filter((id) => id !== element.id)
-        : [...selectedIds, element.id];
-    } else {
-      nextSelection = isSelected ? selectedIds : [element.id];
-    }
-    actions.setSelection(nextSelection);
-
-    // Shift クリックで選択を外した要素は動かさない。
-    if (event.shiftKey && isSelected) return;
-
-    const point = toNormalized(event);
-    const originals = new Map(
-      elements
-        .filter((item) => nextSelection.includes(item.id))
-        .map((item) => [item.id, item]),
-    );
-    const union = unionRect([...originals.values()].map(rectOf));
-    if (!union) return;
-
-    actions.beginTransaction();
-    interactionRef.current = {
-      kind: "move",
-      pointerId: event.pointerId,
-      startX: point.x,
-      startY: point.y,
-      ids: [...originals.keys()],
-      originals,
-      unionBefore: union,
-      moved: false,
-    };
-    (event.currentTarget as Element).setPointerCapture(event.pointerId);
-  };
-
-  const handleHandlePointerDown = (
-    handle: HandleId,
-    event: React.PointerEvent<SVGElement>,
-  ) => {
-    event.stopPropagation();
-    if (event.button !== 0 || selectedIds.length !== 1) return;
-
-    const element = elements.find((item) => item.id === selectedIds[0]);
-    if (!element) return;
-
-    actions.beginTransaction();
-    interactionRef.current = {
-      kind: "resize",
-      pointerId: event.pointerId,
-      handle,
-      id: element.id,
-      original: element,
-      rectBefore: rectOf(element),
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-
-  // --- ドラッグ中 -----------------------------------------------------
-  const handlePointerMove = (event: React.PointerEvent) => {
-    const interaction = interactionRef.current;
-    if (interaction.kind === "idle") return;
-    if (interaction.pointerId !== event.pointerId) return;
-
-    const point = toNormalized(event);
-
-    switch (interaction.kind) {
-      case "marquee": {
-        setMarquee(
-          normalizeRect(
-            interaction.startX,
-            interaction.startY,
-            point.x,
-            point.y,
-          ),
-        );
-        break;
-      }
-
-      case "move": {
-        let dx = point.x - interaction.startX;
-        let dy = point.y - interaction.startY;
-        // Shift で水平・垂直移動に固定する。
-        if (event.shiftKey) {
-          if (Math.abs(dx) > Math.abs(dy)) dy = 0;
-          else dx = 0;
-        }
-        const clamped = clampTranslation(interaction.unionBefore, dx, dy);
-        interaction.moved = true;
-
-        actions.updateElements(
-          (items) =>
-            items.map((item) => {
-              const original = interaction.originals.get(item.id);
-              return original
-                ? translateElement(original, clamped.dx, clamped.dy)
-                : item;
-            }),
-          true,
-        );
-        break;
-      }
-
-      case "resize": {
-        const { original, rectBefore, handle } = interaction;
-
-        // 矢印は端点そのものを動かす。
-        if (handle === "start" || handle === "end") {
-          if (original.type !== "arrow") break;
-          const next =
-            handle === "start"
-              ? { ...original, x1: point.x, y1: point.y }
-              : { ...original, x2: point.x, y2: point.y };
-          actions.updateElements(
-            (items) => items.map((item) => (item.id === original.id ? next : item)),
-            true,
-          );
-          break;
-        }
-
-        const after = resizeRect(rectBefore, handle, point.x, point.y, {
-          // テキストは幅と高さを個別に持たないため、常に比率を保って
-          // フォントサイズを拡大縮小する。
-          keepAspect: event.shiftKey || original.type === "text",
-        });
-        const next = applyResize(original, rectBefore, after, {
-          min: MIN_FONT_SIZE,
-          max: MAX_FONT_SIZE,
-        });
-        actions.updateElements(
-          (items) => items.map((item) => (item.id === original.id ? next : item)),
-          true,
-        );
-        break;
-      }
-
-      case "draw": {
-        actions.updateElements(
-          (items) =>
-            items.map((item) =>
-              item.id === interaction.id
-                ? updateDrawElement(
-                    item,
-                    interaction.startX,
-                    interaction.startY,
-                    point.x,
-                    point.y,
-                    { constrain: event.shiftKey },
-                  )
-                : item,
-            ),
-          true,
-        );
-        break;
-      }
-    }
-  };
-
-  // --- ドラッグ終了 ---------------------------------------------------
-  const endInteraction = (event: React.PointerEvent) => {
-    const interaction = interactionRef.current;
-    if (interaction.kind === "idle") return;
-    if (interaction.pointerId !== event.pointerId) return;
-    interactionRef.current = { kind: "idle" };
-
-    switch (interaction.kind) {
-      case "marquee": {
-        const area = marquee;
-        setMarquee(null);
-        if (!area || area.w < 0.004 || area.h < 0.004) break;
-
-        const hits = elements
-          .filter((element) => rectsIntersect(rectOf(element), area))
-          .map((element) => element.id);
-        const merged = interaction.additive
-          ? [...new Set([...interaction.baseSelection, ...hits])]
-          : hits;
-        actions.setSelection(merged);
-        break;
-      }
-
-      case "move":
-        actions.endTransaction();
-        break;
-
-      case "resize":
-        actions.endTransaction();
-        break;
-
-      case "draw": {
-        const drawn = elements.find((item) => item.id === interaction.id);
-        if (!drawn || isDegenerate(drawn)) {
-          // 点をひとつ打っただけの図形は残さない。
-          actions.removeElement(interaction.id);
-          actions.endTransaction();
-          break;
-        }
-        actions.endTransaction();
-        actions.setSelection([drawn.id]);
-        break;
-      }
-    }
-  };
-
   // --- 描画 -----------------------------------------------------------
+  const measureCtx = { view, fonts };
   const selectedElements = elements.filter((element) =>
     selectedIds.includes(element.id),
   );
-  const selectionRect = unionRect(selectedElements.map(rectOf));
+  const singleSelection =
+    selectedElements.length === 1 ? selectedElements[0] : null;
+
+  const selectionRect = computeSelectionRect(
+    selectedElements,
+    singleSelection,
+    measureCtx,
+  );
   const editingElement =
     elements.find((element) => element.id === editingId) ?? null;
   const hitPadding = HIT_PADDING_PX / cssPxPerPoint;
@@ -493,9 +169,11 @@ export function PdfPageView({
   const cursor =
     tool === "text"
       ? "text"
-      : tool === "select"
-        ? "default"
-        : "crosshair";
+      : tool === "textEdit"
+        ? "crosshair"
+        : tool === "select"
+          ? "default"
+          : "crosshair";
 
   return (
     <div
@@ -508,6 +186,7 @@ export function PdfPageView({
       <canvas
         ref={canvasRef}
         className="absolute inset-0 block h-full w-full bg-white"
+        style={{ width: widthPx, height: heightPx }}
       />
 
       {!hasRendered && (
@@ -523,17 +202,43 @@ export function PdfPageView({
         preserveAspectRatio="none"
         className="absolute inset-0 h-full w-full"
         style={{ touchAction: "none", cursor }}
-        onPointerDown={handleBackgroundPointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={endInteraction}
-        onPointerCancel={endInteraction}
+        onPointerDown={interaction.onBackgroundPointerDown}
+        onPointerMove={interaction.onPointerMove}
+        onPointerUp={interaction.onPointerUp}
+        onPointerCancel={interaction.onPointerUp}
       >
+        {/* 検索のヒット箇所。要素より下に敷く。 */}
+        {searchRects.map((rect, index) => (
+          <rect
+            key={`hit-${index}`}
+            x={rect.x * view.width}
+            y={rect.y * view.height}
+            width={rect.w * view.width}
+            height={rect.h * view.height}
+            fill="#facc15"
+            fillOpacity={0.4}
+            pointerEvents="none"
+          />
+        ))}
+        {activeSearchRects.map((rect, index) => (
+          <rect
+            key={`active-${index}`}
+            x={rect.x * view.width}
+            y={rect.y * view.height}
+            width={rect.w * view.width}
+            height={rect.h * view.height}
+            fill="#fb923c"
+            fillOpacity={0.65}
+            pointerEvents="none"
+          />
+        ))}
+
         {elements.map((element) => (
           <ElementView
             key={element.id}
             element={element}
             view={view}
-            font={font}
+            fonts={fonts}
             images={images}
             isEditing={element.id === editingId}
           />
@@ -543,13 +248,17 @@ export function PdfPageView({
           <ElementHitArea
             key={`hit-${element.id}`}
             element={element}
-            rect={rectOf(element)}
             view={view}
+            fonts={fonts}
             padding={hitPadding}
-            disabled={element.id === editingId}
-            onPointerDown={(event) => handleElementPointerDown(event, element)}
+            disabled={element.id === editingId || element.locked}
+            onPointerDown={(event) =>
+              interaction.onElementPointerDown(event, element)
+            }
             onDoubleClick={() => {
-              if (element.type === "text") actions.startEditing(element.id);
+              if (element.type === "text" && !element.locked) {
+                actions.startEditing(element.id);
+              }
             }}
           />
         ))}
@@ -557,22 +266,44 @@ export function PdfPageView({
         {selectionRect && !editingElement && (
           <SelectionLayer
             rect={selectionRect}
-            element={selectedElements.length === 1 ? selectedElements[0] : null}
+            element={singleSelection}
+            rotation={singleSelection?.rotation ?? 0}
+            center={
+              singleSelection
+                ? elementCenter(singleSelection, view, fonts)
+                : { x: 0, y: 0 }
+            }
             view={view}
             cssPxPerPoint={cssPxPerPoint}
-            onHandlePointerDown={handleHandlePointerDown}
+            onHandlePointerDown={interaction.onHandlePointerDown}
           />
         )}
 
-        {marquee && (
+        {/* スナップの目安線。 */}
+        {interaction.guides.map((guide, index) => (
+          <line
+            key={`guide-${index}`}
+            x1={guide.axis === "x" ? guide.position * view.width : 0}
+            y1={guide.axis === "x" ? 0 : guide.position * view.height}
+            x2={guide.axis === "x" ? guide.position * view.width : view.width}
+            y2={guide.axis === "x" ? view.height : guide.position * view.height}
+            stroke="#ec4899"
+            strokeWidth={1}
+            strokeDasharray="4 3"
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+          />
+        ))}
+
+        {interaction.marquee && (
           <rect
-            x={marquee.x * view.width}
-            y={marquee.y * view.height}
-            width={marquee.w * view.width}
-            height={marquee.h * view.height}
-            fill="#2563eb"
-            fillOpacity={0.08}
-            stroke="#2563eb"
+            x={interaction.marquee.x * view.width}
+            y={interaction.marquee.y * view.height}
+            width={interaction.marquee.w * view.width}
+            height={interaction.marquee.h * view.height}
+            fill={tool === "textEdit" ? "#f59e0b" : "#2563eb"}
+            fillOpacity={0.1}
+            stroke={tool === "textEdit" ? "#f59e0b" : "#2563eb"}
             strokeWidth={1}
             vectorEffect="non-scaling-stroke"
             pointerEvents="none"
@@ -586,19 +317,41 @@ export function PdfPageView({
           element={editingElement}
           view={view}
           cssPxPerPoint={cssPxPerPoint}
-          font={font}
-          onPreview={(text) => actions.previewText(editingElement.id, text)}
-          onFinish={(text) => actions.finishEdit(editingElement.id, text)}
+          fonts={fonts}
+          onPreview={(text) => onPreviewText(editingElement.id, text)}
+          onFinish={(text) => onFinishEdit(editingElement.id, text)}
         />
       )}
     </div>
   );
 }
 
+function computeSelectionRect(
+  selected: EditorElement[],
+  single: EditorElement | null,
+  ctx: { view: { width: number; height: number }; fonts: FontBook },
+): NormalizedRect | null {
+  if (selected.length === 0) return null;
+
+  // 単一選択なら要素そのものの枠（回転前）。枠ごと回して見せる。
+  if (single) return elementRect(single, ctx);
+
+  // 複数選択は軸に平行な外接矩形。
+  const rects = selected.map((element) => elementRect(element, ctx));
+  const x = Math.min(...rects.map((rect) => rect.x));
+  const y = Math.min(...rects.map((rect) => rect.y));
+  return {
+    x,
+    y,
+    w: Math.max(...rects.map((rect) => rect.x + rect.w)) - x,
+    h: Math.max(...rects.map((rect) => rect.y + rect.h)) - y,
+  };
+}
+
 interface ElementHitAreaProps {
   element: EditorElement;
-  rect: NormalizedRect;
   view: { width: number; height: number };
+  fonts: FontBook;
   padding: number;
   disabled: boolean;
   onPointerDown: (event: React.PointerEvent) => void;
@@ -611,8 +364,8 @@ interface ElementHitAreaProps {
  */
 function ElementHitArea({
   element,
-  rect,
   view,
+  fonts,
   padding,
   disabled,
   onPointerDown,
@@ -625,51 +378,62 @@ function ElementHitArea({
     onDoubleClick,
   };
 
-  if (element.type === "arrow") {
+  const shape = (() => {
+    if (element.type === "arrow") {
+      return (
+        <line
+          fill="none"
+          x1={element.x1 * view.width}
+          y1={element.y1 * view.height}
+          x2={element.x2 * view.width}
+          y2={element.y2 * view.height}
+          stroke="transparent"
+          strokeWidth={Math.max(element.strokeWidth, padding)}
+          strokeLinecap="round"
+          {...common}
+        />
+      );
+    }
+
+    if (element.type === "pen") {
+      if (element.points.length < 2) return null;
+      return (
+        <path
+          d={penPathData(element.points, view)}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={Math.max(element.strokeWidth, padding)}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          {...common}
+        />
+      );
+    }
+
+    const rect = elementRect(element, { view, fonts });
     return (
-      <line
-        fill="none"
-        x1={element.x1 * view.width}
-        y1={element.y1 * view.height}
-        x2={element.x2 * view.width}
-        y2={element.y2 * view.height}
-        stroke="transparent"
-        strokeWidth={Math.max(element.strokeWidth, padding)}
-        strokeLinecap="round"
+      <rect
+        fill="transparent"
+        x={rect.x * view.width}
+        y={rect.y * view.height}
+        width={Math.max(rect.w * view.width, padding)}
+        height={Math.max(rect.h * view.height, padding)}
         {...common}
       />
     );
-  }
+  })();
 
-  if (element.type === "pen") {
-    if (element.points.length < 2) return null;
-    const d = element.points
-      .map(
-        (point, index) =>
-          `${index === 0 ? "M" : "L"} ${point.x * view.width} ${point.y * view.height}`,
-      )
-      .join(" ");
-    return (
-      <path
-        d={d}
-        fill="none"
-        stroke="transparent"
-        strokeWidth={Math.max(element.strokeWidth, padding)}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        {...common}
-      />
-    );
-  }
+  if (!shape) return null;
+  if (element.rotation === 0) return shape;
 
+  const center = rectCenter(elementRect(element, { view, fonts }));
   return (
-    <rect
-      fill="transparent"
-      x={rect.x * view.width}
-      y={rect.y * view.height}
-      width={Math.max(rect.w * view.width, padding)}
-      height={Math.max(rect.h * view.height, padding)}
-      {...common}
-    />
+    <g
+      transform={`rotate(${element.rotation} ${center.x * view.width} ${
+        center.y * view.height
+      })`}
+    >
+      {shape}
+    </g>
   );
 }
