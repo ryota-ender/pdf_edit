@@ -264,6 +264,38 @@ npm run typecheck  # tsc --noEmit
 
 ---
 
+## 公開（GitHub Pages）
+
+サーバー処理を一切持たないアプリなので、**静的サイトとしてそのまま配信できます**。
+`main` へ push すると [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml)
+がビルドして公開します。
+
+```bash
+npm run build:pages   # out/ に静的書き出し（NEXT_PUBLIC_BASE_PATH=/pdf_edit）
+```
+
+### 初回だけ必要な設定
+
+リポジトリの **Settings → Pages → Build and deployment → Source** を
+**「GitHub Actions」** に切り替えてください。ここが「Deploy from a branch」の
+ままだと、`index.html` が無いために **README.md が代わりに表示されます**。
+
+### パス接頭辞の扱い
+
+プロジェクトページは `https://<user>.github.io/pdf_edit/` のように
+**下の階層**で配信されます。Next.js の `basePath` は `<Link>` や `_next/` の
+URL は面倒を見てくれますが、コードへ直接書いた絶対パス（フォント・PDF.js の
+worker・OCR の学習データ）までは書き換えません。
+
+そこで [`src/lib/basePath.ts`](src/lib/basePath.ts) の `assetUrl()` を通して
+組み立てています。`@font-face` も同じ理由で、素の CSS ではなく
+[`layout.tsx`](src/app/layout.tsx) で生成しています。
+
+`NEXT_PUBLIC_BASE_PATH` が空のときは静的書き出しに切り替わらないので、
+`npm run build && npm run start` での動作確認や E2E は従来どおりです。
+
+---
+
 ## PDF 処理の仕組み
 
 ### 表示と編集の分離
@@ -458,6 +490,10 @@ npm run build && npm run start    # 別のターミナルで起動
 npm run e2e
 ```
 
+第1引数にアプリの URL を渡せるので、**GitHub Pages と同じくパス接頭辞つきで
+配信した静的書き出し**に対しても同じ検査を回せます
+（`node scripts/e2e-check.mjs http://localhost:3113/pdf_edit ...`）。
+
 確認している内容（全 111 項目）:
 
 | 分類 | 項目 |
@@ -535,6 +571,9 @@ src/
     useFontBook.ts              ウェイト別の日本語フォント
     useAutosave.ts              IndexedDB への自動保存
 
+  lib/
+    basePath.ts                 配信元のパス接頭辞の解決
+
   lib/pdf/
     renderPdf.ts                PDF.js の初期化と描画
     exportPdf.ts                書き出し（焼き込み / 注釈 / 画像フォールバック）
@@ -567,6 +606,9 @@ public/
   fonts/                        Noto Sans JP Regular / Bold + ライセンス
   pdfjs/                        PDF.js の worker / CMap (postinstall で生成)
   ocr/                          Tesseract の実行ファイルと学習データ (同上)
+
+.github/workflows/
+  deploy-pages.yml              GitHub Pages への公開
 
 scripts/
   copy-pdfjs-assets.mjs         PDF.js の配布物を public へ複製

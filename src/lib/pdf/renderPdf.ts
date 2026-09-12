@@ -5,6 +5,7 @@ import type {
 } from "pdfjs-dist";
 import { PdfEditorError, translatePdfJsError } from "./errors";
 import type { PageSize } from "@/types/editor";
+import { assetUrl } from "@/lib/basePath";
 
 /**
  * pdf.js の初期化と描画。
@@ -15,7 +16,7 @@ import type { PageSize } from "@/types/editor";
  * CMap は日本語 PDF の文字コード変換に必要。
  */
 
-const PDFJS_ASSET_BASE = "/pdfjs/";
+const PDFJS_ASSET_BASE = assetUrl("/pdfjs/");
 
 type PdfJsModule = typeof import("pdfjs-dist");
 

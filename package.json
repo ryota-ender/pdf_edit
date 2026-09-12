@@ -7,6 +7,8 @@
     "dev": "next dev",
     "prebuild": "node scripts/copy-pdfjs-assets.mjs",
     "build": "next build",
+    "prebuild:pages": "node scripts/copy-pdfjs-assets.mjs",
+    "build:pages": "NEXT_PUBLIC_BASE_PATH=/pdf_edit next build",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",

@@ -7,6 +7,9 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 const BASE_URL = process.argv[2] ?? "http://localhost:3111";
+// GitHub Pages のように下の階層で配信されている場合に備え、資材の位置は
+// アプリの URL から組み立てる（例: http://host/pdf_edit → /pdf_edit/pdfjs/）。
+const ASSET_BASE = `${new URL(BASE_URL).pathname.replace(/\/$/, "")}/pdfjs/`;
 const FIXTURES = process.argv[3] ?? "./fixtures";
 const OUT = process.argv[4] ?? "./e2e-out";
 
@@ -224,11 +227,11 @@ async function measureExportedInk(pdfPath, pageIndex = 0) {
 
       const doc = await globalThis.pdfjsLib.getDocument({
         data,
-        cMapUrl: "/pdfjs/cmaps/",
+        cMapUrl: `${globalThis.__assetBase}cmaps/`,
         cMapPacked: true,
-        standardFontDataUrl: "/pdfjs/standard_fonts/",
-        wasmUrl: "/pdfjs/wasm/",
-        iccUrl: "/pdfjs/iccs/",
+        standardFontDataUrl: `${globalThis.__assetBase}standard_fonts/`,
+        wasmUrl: `${globalThis.__assetBase}wasm/`,
+        iccUrl: `${globalThis.__assetBase}iccs/`,
       }).promise;
 
       const pdfPage = await doc.getPage(pageIndex + 1);
@@ -260,9 +263,9 @@ async function installHarness() {
   await page.waitForFunction(() => Boolean(globalThis.pdfjsLib), undefined, {
     timeout: 15000,
   });
-  await page.evaluate(() => {
-    globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "/pdfjs/pdf.worker.min.mjs";
+  await page.evaluate((assetBase) => {
+    globalThis.__assetBase = assetBase;
+    globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc = `${assetBase}pdf.worker.min.mjs`;
 
     // 探す色。既定は赤、ハイライトのときは黄色に切り替える。
     globalThis.__inkTarget = "red";
@@ -309,7 +312,7 @@ async function installHarness() {
       }
       return count;
     };
-  });
+  }, ASSET_BASE);
 }
 
 /** 画面下部の通知を閉じる。エラーが出ていたら検査項目として記録する。 */

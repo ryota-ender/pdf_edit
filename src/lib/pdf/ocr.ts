@@ -1,3 +1,4 @@
+import { assetUrl } from "@/lib/basePath";
 import { PdfEditorError } from "./errors";
 import type { CharBox, PageText } from "./textLayer";
 
@@ -13,7 +14,7 @@ import type { CharBox, PageText } from "./textLayer";
  * (`public/ocr/`)。画像も認識結果も外部へ送らない。
  */
 
-const OCR_BASE = "/ocr/";
+const OCR_BASE = assetUrl("/ocr/");
 
 export type OcrLanguage = "jpn" | "eng" | "jpn+eng";
 

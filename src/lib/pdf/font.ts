@@ -1,6 +1,7 @@
 import type { Font as FontkitFont, Subset as FontkitSubset } from "fontkit";
 import { PdfEditorError } from "./errors";
 import type { FontWeight } from "@/types/editor";
+import { assetUrl } from "@/lib/basePath";
 
 /**
  * 日本語フォントの扱い
@@ -14,8 +15,8 @@ import type { FontWeight } from "@/types/editor";
  */
 
 export const FONT_URLS: Record<FontWeight, string> = {
-  regular: "/fonts/NotoSansJP-Regular.ttf",
-  bold: "/fonts/NotoSansJP-Bold.ttf",
+  regular: assetUrl("/fonts/NotoSansJP-Regular.ttf"),
+  bold: assetUrl("/fonts/NotoSansJP-Bold.ttf"),
 };
 
 /** globals.css の @font-face と揃えること。 */

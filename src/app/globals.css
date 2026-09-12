@@ -1,28 +1,10 @@
 @import "tailwindcss";
 
 /*
- * PDF へ埋め込むのと同じ TTF をプレビューでも使う。
- * 同一フォント・同一メトリクスで描くことで、画面上の文字位置と
- * 書き出した PDF の文字位置が一致する。
- * `local()` は指定しない。利用者の環境にある同名フォントが使われると
- * 字形や字送りが変わってしまうため。
+ * @font-face は layout.tsx で組み立てている。
+ * 配信元のパス接頭辞（GitHub Pages の `/pdf_edit/` など）を差し込む必要があり、
+ * 素の CSS では URL を組み立てられないため。
  */
-@font-face {
-  font-family: "NotoSansJPEmbedded";
-  src: url("/fonts/NotoSansJP-Regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  /* 5MB あるので、読めるようになるまでは代替フォントで表示する。 */
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "NotoSansJPEmbeddedBold";
-  src: url("/fonts/NotoSansJP-Bold.ttf") format("truetype");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
 
 @theme {
   --color-canvas: #f1f3f5;
