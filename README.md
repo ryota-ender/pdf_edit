@@ -266,19 +266,37 @@ npm run typecheck  # tsc --noEmit
 
 ## 公開（GitHub Pages）
 
+https://ryota-ender.github.io/pdf_edit/ で公開しています。
+
 サーバー処理を一切持たないアプリなので、**静的サイトとしてそのまま配信できます**。
-`main` へ push すると [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml)
-がビルドして公開します。
+GitHub Pages は「main ブランチの直下を配信」する設定で使っているため、
+**書き出した成果物をリポジトリ直下へ置いて commit** しています。
 
 ```bash
-npm run build:pages   # out/ に静的書き出し（NEXT_PUBLIC_BASE_PATH=/pdf_edit）
+npm run deploy     # ビルド → 直下へ配置
+git add -A && git commit && git push
 ```
 
-### 初回だけ必要な設定
+`npm run deploy` は次の 2 つをまとめて実行します。
 
-リポジトリの **Settings → Pages → Build and deployment → Source** を
-**「GitHub Actions」** に切り替えてください。ここが「Deploy from a branch」の
-ままだと、`index.html` が無いために **README.md が代わりに表示されます**。
+1. `npm run build:pages` — `NEXT_PUBLIC_BASE_PATH=/pdf_edit` で静的書き出し（`out/`）
+2. `node scripts/publish-to-root.mjs` — `out/` の中身を直下へ複製
+
+直下に置かれるもの: `index.html` `404.html` `_next/` `fonts/` `pdfjs/` `ocr/`
+ほか（約 38MB）。**ソースには触れません。** 消すのは「前回この手順が置いたもの」、
+つまり `out/` に入っている名前と同じ直下のエントリだけです。誤って
+`package.json` などを消さないよう、衝突する名前があれば中止します。
+
+### なぜ index.html が要るのか
+
+直下に `index.html` が無いと、GitHub Pages は代わりに **README.md を
+レンダリングして返します**。表示されていたのはこれです。
+
+### .nojekyll
+
+GitHub Pages は既定で Jekyll を通します。Jekyll は **`_` で始まるディレクトリを
+配信しない**ので、`_next/` が丸ごと消えて真っ白になります。これを防ぐため
+`publish-to-root.mjs` が直下に空の `.nojekyll` を置きます。
 
 ### パス接頭辞の扱い
 
@@ -493,6 +511,7 @@ npm run e2e
 第1引数にアプリの URL を渡せるので、**GitHub Pages と同じくパス接頭辞つきで
 配信した静的書き出し**に対しても同じ検査を回せます
 （`node scripts/e2e-check.mjs http://localhost:3113/pdf_edit ...`）。
+公開前にはこの形で 111 項目を通しています。
 
 確認している内容（全 111 項目）:
 
@@ -607,11 +626,9 @@ public/
   pdfjs/                        PDF.js の worker / CMap (postinstall で生成)
   ocr/                          Tesseract の実行ファイルと学習データ (同上)
 
-.github/workflows/
-  deploy-pages.yml              GitHub Pages への公開
-
 scripts/
   copy-pdfjs-assets.mjs         PDF.js の配布物を public へ複製
+  publish-to-root.mjs           out/ を直下へ配置（GitHub Pages 用）
   make-fixtures.mjs             検証用PDFの生成
   make-encrypted-fixture.mjs    パスワード保護PDFの生成
   e2e-check.mjs                 ブラウザでの動作確認（83項目）

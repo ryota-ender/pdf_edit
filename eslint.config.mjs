@@ -15,6 +15,13 @@ const eslintConfig = defineConfig([
     // scripts/copy-pdfjs-assets.mjs が node_modules から複製・取得する配布物。
     "public/pdfjs/**",
     "public/ocr/**",
+    // scripts/publish-to-root.mjs が直下へ置く静的書き出し（GitHub Pages 用）。
+    // ソースではなくビルド成果物なので検査の対象外。
+    "_next/**",
+    "_not-found/**",
+    "404/**",
+    "pdfjs/**",
+    "ocr/**",
   ]),
 ]);
 

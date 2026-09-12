@@ -9,6 +9,7 @@
     "build": "next build",
     "prebuild:pages": "node scripts/copy-pdfjs-assets.mjs",
     "build:pages": "NEXT_PUBLIC_BASE_PATH=/pdf_edit next build",
+    "deploy": "npm run build:pages && node scripts/publish-to-root.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
