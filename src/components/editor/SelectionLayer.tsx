@@ -54,6 +54,7 @@ export function SelectionLayer({
   };
 
   const isArrow = element?.type === "arrow";
+  const isCallout = element?.type === "callout";
   const isLocked = element?.locked ?? false;
 
   const handles: { id: HandleId; x: number; y: number; round?: boolean }[] =
@@ -72,10 +73,23 @@ export function SelectionLayer({
             round: true,
           },
         ]
-      : BOX_HANDLES.map((id) => {
-          const point = handlePosition(id, rect);
-          return { id, x: point.x * view.width, y: point.y * view.height };
-        });
+      : [
+          ...BOX_HANDLES.map((id) => {
+            const point = handlePosition(id, rect);
+            return { id, x: point.x * view.width, y: point.y * view.height };
+          }),
+          // 吹き出しは指し先も掴んで動かせる。
+          ...(isCallout
+            ? [
+                {
+                  id: "target" as HandleId,
+                  x: element.targetX * view.width,
+                  y: element.targetY * view.height,
+                  round: true,
+                },
+              ]
+            : []),
+        ];
 
   const content = (
     <>

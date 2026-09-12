@@ -1,11 +1,12 @@
 import type { FontMetrics, LoadedFont } from "./font";
+import type { CalloutElement, TextElement } from "@/types/editor";
 
 /**
- * テキストの組み方の定義
+ * テキストの組み方
  * ------------------------------------------------------------------
  * プレビュー (SVG) と書き出し (pdf-lib) の位置を一致させるため、
- * 「1 行目のベースラインはどこか」「ブロックの高さはいくつか」を
- * ブラウザのラインボックス計算に **頼らず** ここだけで決める。
+ * 1 文字ずつの置き場所をここだけで決める。ブラウザの行送りや
+ * 文字詰めの実装には一切頼らない。
  *
  *   ┌──────────────── y (要素の上端)
  *   │   ↕ ascentRatio × fontSize
@@ -15,8 +16,7 @@ import type { FontMetrics, LoadedFont } from "./font";
  *   │   ↕ descentRatio × fontSize
  *   └──────────────── ブロックの下端
  *
- * SVG の <text> は y にベースラインを取るので、この計算をそのまま渡せる。
- * pdf-lib の drawText も同じくベースライン基準なので、両者は一致する。
+ * 縦書きのときは行が右から左へ進み、文字は上から下へ積まれる。
  */
 export const LINE_HEIGHT_FACTOR = 1.25;
 
@@ -40,15 +40,60 @@ const NO_LINE_END = "([{（［｛〔〈《「『【〘〖〝｟‘“";
 /** 単語として途中で割ってはいけない文字（英数字とラテン文字）。 */
 const WORD_CHAR = /[0-9A-Za-zÀ-ÖØ-öø-ÿ'’.,]/;
 
+/**
+ * 文字詰め（アキ調整）の対象
+ * ------------------------------------------------------------------
+ * 和文の約物は全角幅で作られているが、実際の組版では前後のアキを
+ * 詰める。JIS X 4051 に倣い、次の 3 種類を半角ぶん詰める。
+ *   - 終わり括弧・句読点: 右側のアキを詰める
+ *   - 始め括弧: 左側のアキを詰める
+ *   - 中点: 左右を四分ずつ詰める
+ */
+const CLOSING_PUNCTUATION = "、。，．）］｝〉》」』】〕｠〟’”";
+const OPENING_PUNCTUATION = "（［｛〈《「『【〔｟〝‘“";
+const MIDDLE_DOT = "・：；";
+
+/** 縦書きで字形を 90 度回さないと向きが合わない文字。 */
+const VERTICAL_ROTATED =
+  "ー〜～…‥−–—―（）［］｛｝〈〉《》「」『』【】〔〕｟｠(){}[]<>";
+
+/** 縦書きで字面を右上へ寄せる文字（句読点・小書き仮名）。 */
+const VERTICAL_SHIFTED = "、。，．ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ";
+
+/** 1 文字の置き場所。原点は行のベースライン（縦書きでは行の中心線）。 */
+export interface GlyphPosition {
+  char: string;
+  /** ブロック左上からのオフセット（ポイント）。 */
+  x: number;
+  y: number;
+  /** 縦書きで字形を 90 度回すか。 */
+  rotated: boolean;
+}
+
+export interface TextLine {
+  text: string;
+  glyphs: GlyphPosition[];
+  /** 行の長さ（横書きなら幅、縦書きなら高さ）。 */
+  advance: number;
+}
+
 /** 1 要素分のレイアウト結果。単位はすべて PDF ポイント。 */
 export interface TextBlockLayout {
-  lines: string[];
-  /** 要素上端から各行のベースラインまでの距離。 */
-  baselineOffsets: number[];
-  /** 最も長い行の幅。折り返し時は折り返し幅そのもの。 */
+  lines: TextLine[];
+  /** ブロックの幅。 */
   width: number;
-  /** ブロック全体の高さ。 */
+  /** ブロックの高さ。 */
   height: number;
+  vertical: boolean;
+}
+
+export interface TextLayoutOptions {
+  /** 折り返し幅（横書き）／折り返し高さ（縦書き）。null なら折り返さない。 */
+  wrapSize?: number | null;
+  align?: "left" | "center" | "right";
+  vertical?: boolean;
+  /** ぶら下げ組。行末の句読点を版面の外へ出す。 */
+  hanging?: boolean;
 }
 
 /**
@@ -68,9 +113,28 @@ export function splitLines(text: string): string[] {
 }
 
 /**
- * 1 段落を折り返し可能な最小単位へ分解する。
- * 英数字の連なりは 1 語としてまとめ、それ以外（CJK など）は 1 文字ずつ。
+ * 文字詰めの量を返す（前アキ・後アキ、ポイント）。
+ * 和文の約物だけを対象にし、欧文には手を入れない。
  */
+function spacingFor(
+  char: string,
+  fontSize: number,
+): { before: number; after: number } {
+  const half = fontSize / 2;
+  const quarter = fontSize / 4;
+
+  if (CLOSING_PUNCTUATION.includes(char)) return { before: 0, after: -half };
+  if (OPENING_PUNCTUATION.includes(char)) return { before: -half, after: 0 };
+  if (MIDDLE_DOT.includes(char)) return { before: -quarter, after: -quarter };
+  return { before: 0, after: 0 };
+}
+
+/** ぶら下げの対象（行末に来たとき版面の外へ出す文字）。 */
+function isHangable(char: string): boolean {
+  return "、。，．".includes(char);
+}
+
+/** 1 段落を折り返し可能な最小単位へ分解する。 */
 function tokenize(paragraph: string): string[] {
   const tokens: string[] = [];
   let word = "";
@@ -90,17 +154,44 @@ function tokenize(paragraph: string): string[] {
   return tokens;
 }
 
+/** 文字列の送り幅を、文字詰めを含めて測る。 */
+function measureRun(
+  text: string,
+  fontSize: number,
+  font: LoadedFont,
+  vertical: boolean,
+): number {
+  if (vertical) {
+    // 縦書きは全角ぶんずつ積む。詰めは句読点のみに効かせる。
+    let total = 0;
+    for (const char of text) {
+      const spacing = spacingFor(char, fontSize);
+      total += fontSize + spacing.before + spacing.after;
+    }
+    return total;
+  }
+
+  let total = 0;
+  for (const char of text) {
+    const spacing = spacingFor(char, fontSize);
+    total += font.measureText(char, fontSize) + spacing.before + spacing.after;
+  }
+  return total;
+}
+
 /**
  * 禁則処理つきの折り返し。
  *
  * 行頭に来てはいけない文字が次行の先頭に来る場合、直前の文字も次行へ送る
- * （追い出し）。行末に来てはいけない文字が行末に残る場合も同様に送る。
+ * （追い出し）。ぶら下げが有効なときは、句読点 1 文字ぶんは溢れを許す。
  */
 function wrapParagraph(
   paragraph: string,
   fontSize: number,
   font: LoadedFont,
-  maxWidth: number,
+  maxSize: number,
+  vertical: boolean,
+  hanging: boolean,
 ): string[] {
   if (paragraph.length === 0) return [""];
 
@@ -108,8 +199,8 @@ function wrapParagraph(
   const lines: string[] = [];
   let current: string[] = [];
 
-  const widthOf = (parts: string[]) =>
-    font.measureText(parts.join(""), fontSize);
+  const sizeOf = (parts: string[]) =>
+    measureRun(parts.join(""), fontSize, font, vertical);
 
   const flush = () => {
     if (current.length === 0) return;
@@ -118,17 +209,16 @@ function wrapParagraph(
   };
 
   for (const token of tokens) {
-    // 半角スペースは行頭に残さない。
     if (current.length === 0 && token === " ") continue;
 
     current.push(token);
-    // 1 語しか無いのに溢れる場合は、割らずにそのまま行として確定させる。
-    if (widthOf(current) <= maxWidth || current.length === 1) continue;
 
-    // 幅を超えたので、今追加した分を次の行へ回す。
+    // ぶら下げ対象の約物は、はみ出しても行に留める。
+    if (hanging && token.length === 1 && isHangable(token)) continue;
+    if (sizeOf(current) <= maxSize || current.length === 1) continue;
+
     const overflow = [current.pop() as string];
 
-    // 追い出し。行が空になる手前で必ず打ち切る。
     let guard = 0;
     while (current.length > 1 && guard < 8) {
       const nextHead = overflow[0]?.[0] ?? "";
@@ -152,44 +242,146 @@ function wrapParagraph(
 }
 
 /**
- * テキストを行へ割り付ける。
+ * テキストを行と文字位置へ割り付ける。
  *
- * `wrapWidth` (PDFポイント) を渡すとその幅で自動折り返しする。
- * null のときは手動改行だけで行が決まる。
+ * `wrapSize` を渡すとその大きさで自動折り返しする。単位は PDF ポイント。
  */
 export function layoutTextBlock(
   text: string,
   fontSize: number,
   font: LoadedFont,
-  wrapWidth?: number | null,
+  options: TextLayoutOptions = {},
 ): TextBlockLayout {
-  const paragraphs = splitLines(text);
+  const {
+    wrapSize = null,
+    align = "left",
+    vertical = false,
+    hanging = false,
+  } = options;
 
-  const lines =
-    wrapWidth && wrapWidth > 0
+  const paragraphs = splitLines(text);
+  const rawLines =
+    wrapSize && wrapSize > 0
       ? paragraphs.flatMap((paragraph) =>
-          wrapParagraph(paragraph, fontSize, font, wrapWidth),
+          wrapParagraph(
+            paragraph,
+            fontSize,
+            font,
+            wrapSize,
+            vertical,
+            hanging,
+          ),
         )
       : paragraphs;
 
   const { ascentRatio, descentRatio } = font.metrics;
+  const lineStep = LINE_HEIGHT_FACTOR * fontSize;
 
-  const baselineOffsets = lines.map(
-    (_, index) => ascentRatio * fontSize + index * LINE_HEIGHT_FACTOR * fontSize,
+  // 行の長さ（横書きは幅、縦書きは高さ）。
+  const advances = rawLines.map((line) =>
+    measureRun(line, fontSize, font, vertical),
   );
+  const longest = Math.max(0, ...advances);
+  const runSize = wrapSize && wrapSize > 0 ? wrapSize : longest;
 
-  const measured = lines.reduce(
-    (max, line) => Math.max(max, font.measureText(line, fontSize)),
-    0,
-  );
-  // 折り返し時は枠の幅がそのままブロック幅。行揃えの基準にもなる。
-  const width = wrapWidth && wrapWidth > 0 ? wrapWidth : measured;
+  const lines: TextLine[] = rawLines.map((line, lineIndex) => {
+    const advance = advances[lineIndex];
 
-  const height =
-    (ascentRatio + descentRatio) * fontSize +
-    (lines.length - 1) * LINE_HEIGHT_FACTOR * fontSize;
+    // 行揃えのぶんだけ開始位置をずらす。
+    const offset =
+      align === "center"
+        ? (runSize - advance) / 2
+        : align === "right"
+          ? runSize - advance
+          : 0;
 
-  return { lines, baselineOffsets, width, height };
+    const glyphs: GlyphPosition[] = [];
+    let cursor = offset;
+
+    for (const char of line) {
+      const spacing = spacingFor(char, fontSize);
+      cursor += spacing.before;
+
+      if (vertical) {
+        // 縦書き: 行は右から左へ。文字は行の中心に置き、上から下へ積む。
+        const columnCenter =
+          runSizeForVertical(rawLines.length, lineStep) -
+          lineIndex * lineStep -
+          lineStep / 2;
+        const rotated = VERTICAL_ROTATED.includes(char);
+        const shifted = VERTICAL_SHIFTED.includes(char);
+
+        glyphs.push({
+          char,
+          // 中心から半分ぶん左へ寄せると、字面が列の中心に来る。
+          x:
+            columnCenter -
+            fontSize / 2 +
+            (shifted ? fontSize * 0.5 : 0),
+          y: cursor + (shifted ? -fontSize * 0.4 : 0) + ascentRatio * fontSize,
+          rotated,
+        });
+        cursor += fontSize + spacing.after;
+      } else {
+        glyphs.push({
+          char,
+          x: cursor,
+          y: ascentRatio * fontSize + lineIndex * lineStep,
+          rotated: false,
+        });
+        cursor += font.measureText(char, fontSize) + spacing.after;
+      }
+    }
+
+    return { text: line, glyphs, advance };
+  });
+
+  const blockThickness =
+    (ascentRatio + descentRatio) * fontSize + (rawLines.length - 1) * lineStep;
+
+  return {
+    lines,
+    width: vertical ? rawLines.length * lineStep : runSize,
+    height: vertical ? runSize : blockThickness,
+    vertical,
+  };
+}
+
+/** 縦書きの版面幅（行数 × 行送り）。 */
+function runSizeForVertical(lineCount: number, lineStep: number): number {
+  return lineCount * lineStep;
+}
+
+/** 吹き出しの枠と文字のあいだの余白（ポイント）。 */
+export const CALLOUT_PADDING = 8;
+
+/**
+ * 要素の設定からレイアウトを求める。
+ * プレビューと書き出しで同じ結果を得るため、必ずこの関数を通す。
+ */
+export function textLayoutFor(
+  element: TextElement | CalloutElement,
+  font: LoadedFont,
+  view: { width: number; height: number },
+): TextBlockLayout {
+  if (element.type === "callout") {
+    // 吹き出しの文字は枠の内側に収める。
+    return layoutTextBlock(element.text, element.fontSize, font, {
+      wrapSize: Math.max(1, element.w * view.width - CALLOUT_PADDING * 2),
+      align: "left",
+    });
+  }
+
+  return layoutTextBlock(element.text, element.fontSize, font, {
+    // 縦書きの折り返しは「列の高さ」なので、ページの高さを基準にする。
+    wrapSize:
+      element.width === null
+        ? null
+        : element.width * (element.vertical ? view.height : view.width),
+    align: element.align,
+    vertical: element.vertical,
+    hanging: element.hanging,
+  });
 }
 
 /**

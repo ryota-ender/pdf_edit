@@ -1,5 +1,5 @@
 import { clamp } from "./coordinates";
-import { layoutTextBlock } from "./textLayout";
+import { textLayoutFor } from "./textLayout";
 import type { FontBook } from "./font";
 import type {
   EditorElement,
@@ -32,12 +32,10 @@ export function elementRect(
   }
 
   if (element.type === "text") {
-    const font = ctx.fonts.get(element.fontWeight);
-    const layout = layoutTextBlock(
-      element.text,
-      element.fontSize,
-      font,
-      element.width === null ? null : element.width * ctx.view.width,
+    const layout = textLayoutFor(
+      element,
+      ctx.fonts.get(element.fontWeight),
+      ctx.view,
     );
     return {
       x: element.x,
@@ -201,6 +199,7 @@ export type HandleId =
   | "w"
   | "start"
   | "end"
+  | "target"
   | "rotate";
 
 export const BOX_HANDLES: HandleId[] = [
@@ -231,6 +230,7 @@ export const HANDLE_CURSORS: Record<HandleId, string> = {
   w: "ew-resize",
   start: "move",
   end: "move",
+  target: "move",
   rotate: "grab",
 };
 

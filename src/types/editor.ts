@@ -8,7 +8,7 @@ export type ToolId =
   | "arrow"
   | "pen"
   | "image"
-  | "stamp"
+  | "callout"
   | "textEdit";
 
 /** 図形を描くツール（ドラッグして作るもの）。 */
@@ -18,6 +18,7 @@ export const DRAW_TOOLS = [
   "ellipse",
   "arrow",
   "pen",
+  "callout",
 ] as const;
 
 export type DrawToolId = (typeof DRAW_TOOLS)[number];
@@ -40,6 +41,29 @@ interface ElementBase {
   locked: boolean;
   /** 同じ値を持つ要素はまとめて選択・移動される。 */
   groupId: string | null;
+  /** false にすると画面にも出力にも描かれない（レイヤー一覧から切り替える）。 */
+  visible: boolean;
+  /** レイヤー一覧に出す名前。未設定なら種類から自動で決める。 */
+  name?: string;
+  /** レビュー用のコメント。PDF注釈として書き出すと返信ごと持ち出せる。 */
+  comment?: CommentThread;
+}
+
+/** 注釈に付けるコメントと、その返信。 */
+export interface CommentThread {
+  author: string;
+  text: string;
+  createdAt: number;
+  replies: CommentReply[];
+  /** 解決済みにすると一覧で畳まれる。 */
+  resolved: boolean;
+}
+
+export interface CommentReply {
+  id: string;
+  author: string;
+  text: string;
+  createdAt: number;
 }
 
 /** 矩形で位置と大きさが決まる要素。左上が (x, y)。 */
@@ -65,6 +89,10 @@ export interface TextElement extends ElementBase {
   fontWeight: FontWeight;
   /** 疑似イタリック。日本語フォントに斜体が無いため字送りを傾けて表現する。 */
   italic: boolean;
+  /** 縦書き。行は右から左へ進む。 */
+  vertical: boolean;
+  /** ぶら下げ組。行末の句読点を版面の外へ出す。 */
+  hanging: boolean;
   /**
    * 折り返し幅（正規化）。null なら折り返さず、改行だけで行が決まる。
    * 値があるときはこの幅で自動折り返しし、日本語の禁則処理も適用する。
@@ -132,6 +160,26 @@ export interface ImageElement extends ElementBase, BoxGeometry {
   assetId: string;
 }
 
+/**
+ * 吹き出し。文字の入った枠と、指し先へ伸びる引き出し線をひとまとめにする。
+ * 枠を動かすと線が追従する。
+ */
+export interface CalloutElement extends ElementBase, BoxGeometry {
+  type: "callout";
+  /** 指し先の正規化座標。 */
+  targetX: number;
+  targetY: number;
+  text: string;
+  fontSize: number;
+  color: string;
+  fontWeight: FontWeight;
+  /** 枠の塗りと線。 */
+  fill: string | null;
+  stroke: string | null;
+  strokeWidth: number;
+  radius: number;
+}
+
 export type EditorElement =
   | TextElement
   | RectElement
@@ -139,20 +187,34 @@ export type EditorElement =
   | HighlightElement
   | ArrowElement
   | PenElement
-  | ImageElement;
+  | ImageElement
+  | CalloutElement;
 
 export type ElementType = EditorElement["type"];
 
 /** 矩形で大きさが決まる要素かどうか。 */
 export function isBoxElement(
   element: EditorElement,
-): element is RectElement | EllipseElement | HighlightElement | ImageElement {
+): element is
+  | RectElement
+  | EllipseElement
+  | HighlightElement
+  | ImageElement
+  | CalloutElement {
   return (
     element.type === "rect" ||
     element.type === "ellipse" ||
     element.type === "highlight" ||
-    element.type === "image"
+    element.type === "image" ||
+    element.type === "callout"
   );
+}
+
+/** 文字を持つ要素かどうか。 */
+export function hasText(
+  element: EditorElement,
+): element is TextElement | CalloutElement {
+  return element.type === "text" || element.type === "callout";
 }
 
 /** 塗り・枠線を持つ図形かどうか。 */
@@ -167,16 +229,42 @@ export type RotationDelta = 0 | 90 | 180 | 270;
 
 /** 編集後のドキュメントに残っている 1 ページ分の状態。 */
 export interface PageState {
-  /** 元 PDF における 0 始まりのページ番号。並べ替えても変わらない。 */
+  /**
+   * 元 PDF における 0 始まりのページ番号。並べ替えても変わらない。
+   * `-1` なら元ページを持たない白紙ページ。
+   */
   sourceIndex: number;
   /**
    * どの読み込み済みファイル由来か。PDF 結合に対応するため、
-   * ページごとに出どころを持つ。単一ファイルなら常に既定値。
+   * ページごとに出どころを持つ。白紙ページでは空文字。
    */
   sourceId: string;
   /** 元 PDF のページ回転に対して、エディタ上で追加した時計回りの回転量。 */
   rotation: RotationDelta;
+  /** 白紙ページの寸法（PDFポイント）。`sourceIndex < 0` のときだけ使う。 */
+  blankSize?: PageSize;
+  /**
+   * 表示・書き出しに使う切り抜き。表示中のページに対する比率で持つ。
+   * 設定すると、この範囲だけが 1 ページとして扱われる。
+   */
+  crop?: NormalizedRect;
+  /** 用紙サイズの変更先（PDFポイント）。中身は収まるよう拡大縮小される。 */
+  resizeTo?: PageSize;
 }
+
+/** 元ページを持たない白紙ページか。 */
+export function isBlankPage(page: PageState): boolean {
+  return page.sourceIndex < 0;
+}
+
+/** よく使う用紙サイズ（ポイント）。 */
+export const PAPER_SIZES: { label: string; size: PageSize }[] = [
+  { label: "A4 縦", size: { width: 595.28, height: 841.89 } },
+  { label: "A4 横", size: { width: 841.89, height: 595.28 } },
+  { label: "A3 縦", size: { width: 841.89, height: 1190.55 } },
+  { label: "B5 縦", size: { width: 498.9, height: 708.66 } },
+  { label: "Letter", size: { width: 612, height: 792 } },
+];
 
 /**
  * Undo / Redo の対象になる編集内容のすべて。

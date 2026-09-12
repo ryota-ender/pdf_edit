@@ -6,6 +6,7 @@ import {
   CursorIcon,
   HighlightIcon,
   ImageIcon,
+  CommentIcon,
   PenIcon,
   SquareIcon,
   TextCursorIcon,
@@ -28,6 +29,7 @@ const TOOLS: ToolDefinition[] = [
   { id: "rect", label: "四角形", shortcut: "R", Icon: SquareIcon },
   { id: "ellipse", label: "円", shortcut: "O", Icon: CircleIcon },
   { id: "arrow", label: "矢印", shortcut: "A", Icon: ArrowIcon },
+  { id: "callout", label: "吹き出し", shortcut: "C", Icon: CommentIcon },
   { id: "image", label: "画像", shortcut: "I", Icon: ImageIcon },
   {
     id: "textEdit",
@@ -51,7 +53,7 @@ export function ToolRail({ tool, onSelect }: ToolRailProps) {
     >
       {TOOLS.map(({ id, label, shortcut, Icon }, index) => (
         <div key={id} className="contents">
-          {(index === 2 || index === 7) && <Separator />}
+          {(index === 2 || index === 8) && <Separator />}
           <button
             type="button"
             onClick={() => onSelect(id)}

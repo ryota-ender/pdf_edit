@@ -34,7 +34,12 @@ export class ImageAssetStore {
       );
     }
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    // スマホ写真をそのまま埋め込むと出力が数MB単位で膨らむ。
+    // 印刷に十分な解像度は保ちつつ、長辺を上限まで縮める。
+    const bytes = await downscaleIfNeeded(
+      new Uint8Array(await file.arrayBuffer()),
+      format,
+    );
     const objectUrl = URL.createObjectURL(
       new Blob([bytes.slice()], { type: file.type || `image/${format}` }),
     );
@@ -84,6 +89,57 @@ export class ImageAssetStore {
       URL.revokeObjectURL(asset.objectUrl);
     }
     this.assets.clear();
+  }
+}
+
+/** 長辺がこれを超える画像は縮小する（ポイントではなくピクセル）。 */
+const MAX_IMAGE_EDGE = 2400;
+
+/**
+ * 大きすぎる画像を縮小する。
+ * canvas 経由で再エンコードするので、PNG は PNG のまま、JPEG は JPEG のまま。
+ */
+async function downscaleIfNeeded(
+  bytes: Uint8Array,
+  format: "png" | "jpg",
+): Promise<Uint8Array> {
+  const type = format === "png" ? "image/png" : "image/jpeg";
+  const url = URL.createObjectURL(new Blob([bytes.slice()], { type }));
+
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+
+    const longest = Math.max(image.naturalWidth, image.naturalHeight);
+    if (longest <= MAX_IMAGE_EDGE) return bytes;
+
+    const scale = MAX_IMAGE_EDGE / longest;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(image.naturalWidth * scale);
+    canvas.height = Math.round(image.naturalHeight * scale);
+
+    const context = canvas.getContext("2d");
+    if (!context) return bytes;
+    // JPEG は透明を持てないので、白で下地を敷いてから描く。
+    if (format === "jpg") {
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, type, format === "jpg" ? 0.9 : undefined),
+    );
+    if (!blob) return bytes;
+
+    const reduced = new Uint8Array(await blob.arrayBuffer());
+    // 縮小したのに大きくなる場合（PNG でありがち）は元を使う。
+    return reduced.length < bytes.length ? reduced : bytes;
+  } catch {
+    return bytes;
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 

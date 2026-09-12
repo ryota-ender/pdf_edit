@@ -23,6 +23,12 @@ export interface LoadedSource {
   sizes: PageSize[];
   /** 元 PDF が各ページに持っている /Rotate の値。 */
   rotations: number[];
+  /**
+   * パスワードで保護されていたか。
+   * pdf-lib は暗号化 PDF を書き出せないので、書き出し時に
+   * ページを画像へ起こす必要があるかの判断に使う。
+   */
+  encrypted: boolean;
 }
 
 export interface PasswordPrompt {
@@ -99,7 +105,15 @@ export function usePdfDocument(): PdfDocumentState {
         }
         const { sizes, rotations } = await getPageSizes(opened.doc);
         destroyersRef.current.set(id, opened.destroy);
-        return { id, doc: opened.doc, bytes, fileName, sizes, rotations };
+        return {
+          id,
+          doc: opened.doc,
+          bytes,
+          fileName,
+          sizes,
+          rotations,
+          encrypted: password !== undefined,
+        };
       } catch (error) {
         void opened.destroy();
         throw error;

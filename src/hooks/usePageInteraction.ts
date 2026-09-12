@@ -422,6 +422,17 @@ export function usePageInteraction({
       case "resize": {
         const { original, rectBefore, handle, centerBefore } = interaction;
 
+        // 吹き出しの指し先は、枠と切り離して動かす。
+        if (handle === "target") {
+          if (original.type !== "callout") break;
+          const moved = { ...original, targetX: point.x, targetY: point.y };
+          actions.updateElements(
+            (items) => items.map((item) => (item.id === original.id ? moved : item)),
+            true,
+          );
+          break;
+        }
+
         // 矢印は端点そのものを動かす。
         if (handle === "start" || handle === "end") {
           if (original.type !== "arrow") break;

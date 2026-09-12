@@ -2,15 +2,28 @@ import { PDFDocument, degrees } from "pdf-lib";
 import type { PDFFont, PDFImage, PDFPage } from "pdf-lib";
 import { PdfEditorError, translatePdfLibError } from "./errors";
 import { createFontkitAdapter, loadFontkit, loadJapaneseFont } from "./font";
-import { normalizeAngle } from "./coordinates";
+import { normalizeAngle, viewPointToPdfPoint } from "./coordinates";
 import { buildElementOperators, normalizedToPdf } from "./drawElements";
 import type { DrawResources, PageGeometry } from "./drawElements";
 import { AnnotationResources, appendAnnotation } from "./annotations";
+import { copyOutlines } from "./outlines";
+import { applyFormValues } from "./forms";
 import { elementBoundingRect } from "./geometry";
 import type { FontBook, LoadedFont } from "./font";
 import { createFallbackFont } from "./font";
-import type { ImageAssetStore } from "./imageAssets";
-import type { EditorDoc, EditorElement, FontWeight } from "@/types/editor";
+/** 書き出しに必要な画像データ（Worker へ渡せるよう素の値だけ）。 */
+export interface ExportImage {
+  id: string;
+  bytes: Uint8Array;
+  format: "png" | "jpg";
+}
+import type {
+  EditorDoc,
+  EditorElement,
+  FontWeight,
+  PageState,
+} from "@/types/editor";
+import { hasText, isBlankPage } from "@/types/editor";
 
 /** 読み込み済みの PDF ファイル 1 つ。 */
 export interface PdfSource {
@@ -22,31 +35,36 @@ export interface PdfSource {
 /** 書き出し方。 */
 export type ExportMode = "flatten" | "annotate";
 
-/** ページを画像として取り込むための関数。 */
-export type RasterizePage = (
-  sourceId: string,
-  sourceIndex: number,
-  rotation: number,
-) => Promise<{ bytes: Uint8Array; width: number; height: number }>;
+/** 画像として取り込み直したページ。キーは `${sourceId}:${sourceIndex}`。 */
+export interface RasterPage {
+  key: string;
+  bytes: Uint8Array;
+  width: number;
+  height: number;
+}
 
 export interface ExportOptions {
   sources: PdfSource[];
   doc: EditorDoc;
-  images: ImageAssetStore;
+  images: ExportImage[];
   /** 出力ファイル名の元にする名前。 */
   baseFileName?: string;
   mode: ExportMode;
   /** 指定するとそのページだけを書き出す（ページ抽出・分割用）。 */
   pageIndexes?: number[];
   /**
-   * pdf-lib が読めないファイル（パスワード保護など）を救済するための関数。
-   * ページを画像として取り込み直す。
+   * pdf-lib が読めないファイル（パスワード保護など）の救済用に、
+   * 呼び出し側で画像化しておいたページ。
    */
-  rasterizePage?: RasterizePage;
+  rasters?: RasterPage[];
+  /** フォーム欄へ書き込む値。 */
+  formValues?: Record<string, string>;
+  /** フォームを編集できない状態に固める。 */
+  flattenForm?: boolean;
 }
 
 export interface ExportResult {
-  blob: Blob;
+  bytes: Uint8Array;
   fileName: string;
   /** サブセット埋め込みに失敗してフォント全体を埋め込んだ場合に true。 */
   usedFullFontEmbed: boolean;
@@ -87,7 +105,9 @@ async function buildPdf(
     baseFileName,
     mode,
     pageIndexes,
-    rasterizePage,
+    rasters,
+    formValues,
+    flattenForm,
   }: ExportOptions,
   { subset }: { subset: boolean },
 ): Promise<ExportResult> {
@@ -113,7 +133,11 @@ async function buildPdf(
     try {
       loadedSources.set(source.id, await PDFDocument.load(source.bytes.slice()));
     } catch (error) {
-      if (!rasterizePage) throw translatePdfLibError(error);
+      // 画像化しておいたページがあるなら、そちらで組み立てる。
+      const hasRaster = rasters?.some((raster) =>
+        raster.key.startsWith(`${source.id}:`),
+      );
+      if (!hasRaster) throw translatePdfLibError(error);
       rasterSources.add(source.id);
     }
   }
@@ -145,16 +169,24 @@ async function buildPdf(
     pdfDoc = await PDFDocument.create();
 
     for (const state of pageStates) {
+      // 白紙ページ。元ページを持たないので、指定の寸法で作るだけ。
+      if (isBlankPage(state)) {
+        const size = state.blankSize ?? { width: 595.28, height: 841.89 };
+        pdfDoc.addPage([size.width, size.height]);
+        continue;
+      }
+
       // 画像として取り込むファイルのページ。
       if (rasterSources.has(state.sourceId)) {
-        const sourceInfo = sources.find((item) => item.id === state.sourceId);
-        const baseRotation = 0;
-        const raster = await (rasterizePage as RasterizePage)(
-          state.sourceId,
-          state.sourceIndex,
-          baseRotation + state.rotation,
+        const raster = rasters?.find(
+          (item) => item.key === `${state.sourceId}:${state.sourceIndex}`,
         );
-        const image = await pdfDoc.embedPng(raster.bytes);
+        if (!raster) {
+          throw new PdfEditorError(
+            "保護されたPDFのページを取り込めませんでした。",
+          );
+        }
+        const image = await pdfDoc.embedPng(raster.bytes.slice());
         const page = pdfDoc.addPage([raster.width, raster.height]);
         page.drawImage(image, {
           x: 0,
@@ -162,7 +194,6 @@ async function buildPdf(
           width: raster.width,
           height: raster.height,
         });
-        void sourceInfo;
         continue;
       }
 
@@ -180,7 +211,11 @@ async function buildPdf(
     }
 
     const first = loadedSources.get(sources[0].id);
-    if (first) copyDocumentInfo(first, pdfDoc);
+    if (first) {
+      copyDocumentInfo(first, pdfDoc);
+      // 並びが変わっていない範囲でしおりを引き継ぐ。
+      copyOutlines(first, pdfDoc, pageStates, sources[0].id);
+    }
     pages = pdfDoc.getPages();
   }
 
@@ -189,15 +224,27 @@ async function buildPdf(
   // 要素の正規化座標は「最終的な向きで表示したページ」を基準にしている
   // ので、描画位置の計算にも同じ角度を使う。
   const finalRotations = pages.map((page, index) => {
-    // 画像として取り込んだページは、回転を焼き込み済みなので触らない。
-    if (rasterSources.has(pageStates[index].sourceId)) return 0;
+    const state = pageStates[index];
+
+    // 画像として取り込んだページと白紙は、回転を焼き込み済みなので触らない。
+    if (rasterSources.has(state.sourceId) || isBlankPage(state)) {
+      applyCrop(page, state, 0);
+      return 0;
+    }
 
     const rotation = normalizeAngle(
-      page.getRotation().angle + pageStates[index].rotation,
+      page.getRotation().angle + state.rotation,
     );
     page.setRotation(degrees(rotation));
+    applyCrop(page, state, rotation);
     return rotation;
   });
+
+  // 用紙サイズの変更は、元ページを縮小して新しい用紙の中央へ置き直す。
+  if (pageStates.some((state) => state.resizeTo)) {
+    await resizePages(pdfDoc, pages, pageStates);
+    pages = pdfDoc.getPages();
+  }
 
   // --- 描く要素を集める --------------------------------------------
   // 選択したページだけを書き出す場合に備え、ページ番号を振り直す。
@@ -215,9 +262,10 @@ async function buildPdf(
     }));
 
   // --- フォントを用意する ------------------------------------------
+  // 文字を持つ要素（テキストと吹き出し）で使うウェイトを集める。
   const usedWeights = new Set<FontWeight>();
   for (const { element } of drawable) {
-    if (element.type === "text") usedWeights.add(element.fontWeight);
+    if (hasText(element)) usedWeights.add(element.fontWeight);
   }
 
   const measured = new Map<FontWeight, LoadedFont>();
@@ -265,7 +313,7 @@ async function buildPdf(
   const embeddedImages = new Map<string, PDFImage>();
   for (const { element } of drawable) {
     if (element.type !== "image" || embeddedImages.has(element.assetId)) continue;
-    const asset = images.get(element.assetId);
+    const asset = images.find((image) => image.id === element.assetId);
     if (!asset) continue;
     embeddedImages.set(
       element.assetId,
@@ -298,6 +346,13 @@ async function buildPdf(
     }
   }
 
+  // フォーム欄への記入。注釈より先に済ませて外観を確定させる。
+  if (formValues && Object.keys(formValues).length > 0) {
+    await applyFormValues(pdfDoc, formValues, {
+      flatten: flattenForm ?? false,
+    });
+  }
+
   let bytes: Uint8Array;
   try {
     bytes = await pdfDoc.save();
@@ -305,13 +360,8 @@ async function buildPdf(
     throw translatePdfLibError(error);
   }
 
-  // Blob へは ArrayBuffer を渡す。pdf-lib が返す Uint8Array は
-  // SharedArrayBuffer 由来の可能性を型上排除できないため、実体をコピーする。
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-
   return {
-    blob: new Blob([buffer], { type: "application/pdf" }),
+    bytes,
     fileName: buildFileName(baseFileName),
     usedFullFontEmbed,
     usedRasterFallback: rasterSources.size > 0,
@@ -444,6 +494,76 @@ function annotationBox(
 }
 
 /**
+ * 切り抜きを CropBox として適用する。
+ *
+ * 要素の正規化座標は「表示中のページ」を基準にしているので、CropBox を
+ * 縮めればそのまま新しい版面が基準になる。描画側は `getCropBox()` を
+ * 見ているため、追加の変換は要らない。
+ */
+function applyCrop(page: PDFPage, state: PageState, rotation: number): void {
+  if (!state.crop) return;
+
+  const box = page.getCropBox();
+  const swapped = rotation % 180 === 90;
+  const viewWidth = swapped ? box.height : box.width;
+  const viewHeight = swapped ? box.width : box.height;
+
+  // 表示座標の切り抜き矩形を、ページのユーザー空間へ戻す。
+  const corners = [
+    viewPointToPdfPoint(
+      state.crop.x * viewWidth,
+      state.crop.y * viewHeight,
+      box,
+      rotation,
+    ),
+    viewPointToPdfPoint(
+      (state.crop.x + state.crop.w) * viewWidth,
+      (state.crop.y + state.crop.h) * viewHeight,
+      box,
+      rotation,
+    ),
+  ];
+
+  const x0 = Math.min(corners[0].x, corners[1].x);
+  const y0 = Math.min(corners[0].y, corners[1].y);
+  const x1 = Math.max(corners[0].x, corners[1].x);
+  const y1 = Math.max(corners[0].y, corners[1].y);
+
+  page.setCropBox(x0, y0, x1 - x0, y1 - y0);
+}
+
+/**
+ * 用紙サイズを変える。
+ * 元のページを部品として埋め込み、縦横比を保ったまま中央へ置く。
+ */
+async function resizePages(
+  pdfDoc: PDFDocument,
+  pages: PDFPage[],
+  states: PageState[],
+): Promise<void> {
+  for (let index = pages.length - 1; index >= 0; index -= 1) {
+    const target = states[index].resizeTo;
+    if (!target) continue;
+
+    const embedded = await pdfDoc.embedPage(pages[index]);
+    const scale = Math.min(
+      target.width / embedded.width,
+      target.height / embedded.height,
+    );
+
+    const page = pdfDoc.insertPage(index, [target.width, target.height]);
+    page.drawPage(embedded, {
+      xScale: scale,
+      yScale: scale,
+      x: (target.width - embedded.width * scale) / 2,
+      y: (target.height - embedded.height * scale) / 2,
+    });
+    // 元のページ（1 つ後ろへずれている）を取り除く。
+    pdfDoc.removePage(index + 1);
+  }
+}
+
+/**
  * ページを組み直したときに失われる文書情報を引き継ぐ。
  * しおりやフォームまでは移せないが、タイトル等は保てる。
  */
@@ -464,6 +584,39 @@ export function buildFileName(originalFileName?: string): string {
   if (!originalFileName) return "edited-document.pdf";
   const base = originalFileName.replace(/\.pdf$/i, "").trim();
   return base.length > 0 ? `${base}-edited.pdf` : "edited-document.pdf";
+}
+
+/**
+ * 生成した PDF をそのまま印刷ダイアログへ送る。
+ * ダウンロードを挟まずに刷れるので、確認印刷が速い。
+ */
+export function printBlob(blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const frame = document.createElement("iframe");
+  frame.style.position = "fixed";
+  frame.style.right = "0";
+  frame.style.bottom = "0";
+  frame.style.width = "0";
+  frame.style.height = "0";
+  frame.style.border = "0";
+  frame.src = url;
+
+  frame.onload = () => {
+    try {
+      frame.contentWindow?.focus();
+      frame.contentWindow?.print();
+    } catch {
+      // 印刷できない環境では黙って諦める（ダウンロードは使える）。
+    }
+    // 印刷ダイアログが閉じるまで iframe を残す必要があるため、
+    // 少し余裕を持ってから片付ける。
+    setTimeout(() => {
+      frame.remove();
+      URL.revokeObjectURL(url);
+    }, 60000);
+  };
+
+  document.body.appendChild(frame);
 }
 
 /** 生成した Blob をダウンロードさせ、URL を確実に解放する。 */

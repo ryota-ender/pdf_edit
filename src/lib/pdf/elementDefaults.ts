@@ -2,6 +2,7 @@ import { DEFAULT_FONT_SIZE, DEFAULT_TEXT } from "./textLayout";
 import { isBoxElement } from "@/types/editor";
 import type {
   ArrowElement,
+  CalloutElement,
   DrawToolId,
   EditorElement,
   EllipseElement,
@@ -25,6 +26,8 @@ export interface StyleDefaults {
   fontSize: number;
   fontWeight: FontWeight;
   italic: boolean;
+  vertical: boolean;
+  hanging: boolean;
   shapeStroke: string;
   shapeFill: string | null;
   strokeWidth: number;
@@ -41,6 +44,8 @@ export const INITIAL_STYLE: StyleDefaults = {
   fontSize: DEFAULT_FONT_SIZE,
   fontWeight: "regular",
   italic: false,
+  vertical: false,
+  hanging: false,
   shapeStroke: "#2563eb",
   shapeFill: null,
   strokeWidth: 2,
@@ -68,6 +73,8 @@ export function deriveStyle(
         fontSize: element.fontSize,
         fontWeight: element.fontWeight,
         italic: element.italic,
+        vertical: element.vertical,
+        hanging: element.hanging,
       };
     case "rect":
       return {
@@ -123,6 +130,7 @@ function base(pageIndex: number) {
     rotation: 0,
     locked: false,
     groupId: null,
+    visible: true,
   };
 }
 
@@ -145,8 +153,35 @@ export function createTextElement(
     align: "left",
     fontWeight: style.fontWeight,
     italic: style.italic,
+    vertical: style.vertical,
+    hanging: style.hanging,
     width: null,
     ...overrides,
+  };
+}
+
+/** 吹き出し。枠と指し先をまとめて持つ。 */
+export function createCalloutElement(
+  pageIndex: number,
+  rect: NormalizedRect,
+  target: { x: number; y: number },
+  style: StyleDefaults,
+): CalloutElement {
+  return {
+    id: createId("callout"),
+    type: "callout",
+    ...base(pageIndex),
+    ...rect,
+    targetX: target.x,
+    targetY: target.y,
+    text: DEFAULT_TEXT,
+    fontSize: style.fontSize,
+    color: style.textColor,
+    fontWeight: style.fontWeight,
+    fill: "#ffffff",
+    stroke: style.shapeStroke,
+    strokeWidth: style.strokeWidth,
+    radius: 4,
   };
 }
 
@@ -252,6 +287,28 @@ export function createDrawElement(
         head: style.arrowHead,
       } satisfies ArrowElement;
 
+    case "callout":
+      return {
+        id: createId("callout"),
+        type: "callout",
+        ...base(pageIndex),
+        x,
+        y,
+        w: 0,
+        h: 0,
+        // 指し先は作った直後に左下へ少し離して置く。あとで掴んで動かせる。
+        targetX: Math.max(0, x - 0.08),
+        targetY: Math.min(1, y + 0.12),
+        text: DEFAULT_TEXT,
+        fontSize: Math.min(style.fontSize, 14),
+        color: style.textColor,
+        fontWeight: style.fontWeight,
+        fill: "#ffffff",
+        stroke: style.shapeStroke,
+        strokeWidth: style.strokeWidth,
+        radius: 4,
+      } satisfies CalloutElement;
+
     default:
       return {
         id: createId("pen"),
@@ -336,6 +393,7 @@ export function isDegenerate(element: EditorElement): boolean {
 }
 
 export const ELEMENT_LABELS: Record<EditorElement["type"], string> = {
+  callout: "吹き出し",
   text: "テキスト",
   rect: "四角形",
   ellipse: "円",

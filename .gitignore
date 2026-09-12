@@ -46,3 +46,6 @@ next-env.d.ts
 # 動作確認スクリプトの生成物
 /fixtures/
 /e2e-out/
+
+# scripts/copy-pdfjs-assets.mjs が用意する OCR (Tesseract) の資材
+/public/ocr/

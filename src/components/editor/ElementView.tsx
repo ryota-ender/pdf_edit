@@ -1,8 +1,13 @@
 "use client";
 
+import { memo } from "react";
 import { FONT_FAMILIES, ITALIC_SKEW_DEGREES } from "@/lib/pdf/font";
-import { layoutTextBlock } from "@/lib/pdf/textLayout";
-import { arrowHeadPoints, penOutline } from "@/lib/pdf/drawElements";
+import { CALLOUT_PADDING, textLayoutFor } from "@/lib/pdf/textLayout";
+import {
+  arrowHeadPoints,
+  calloutAnchor,
+  penOutline,
+} from "@/lib/pdf/drawElements";
 import type { FontBook } from "@/lib/pdf/font";
 import type { ImageAssetStore } from "@/lib/pdf/imageAssets";
 import type { EditorElement, Point } from "@/types/editor";
@@ -28,13 +33,15 @@ interface ElementViewProps {
  * 要素自身の回転は <g transform="rotate()"> で表す。viewBox がポイント
  * 単位なので、書き出し側の回転計算と同じ結果になる。
  */
-export function ElementView({
+export const ElementView = memo(function ElementView({
   element,
   view,
   fonts,
   images,
   isEditing,
 }: ElementViewProps) {
+  if (!element.visible) return null;
+
   const body = renderBody(element, view, fonts, images, isEditing);
   if (!body) return null;
   if (element.rotation === 0) return body;
@@ -48,7 +55,7 @@ export function ElementView({
       {body}
     </g>
   );
-}
+});
 
 /** 回転の軸になる中心点（PDFポイント）。 */
 export function elementCenter(
@@ -84,15 +91,65 @@ export function elementCenter(
 }
 
 function textLayoutOf(
-  element: Extract<EditorElement, { type: "text" }>,
+  element: Extract<EditorElement, { type: "text" | "callout" }>,
   view: { width: number; height: number },
   fonts: FontBook,
 ) {
-  return layoutTextBlock(
-    element.text,
-    element.fontSize,
-    fonts.get(element.fontWeight),
-    element.width === null ? null : element.width * view.width,
+  return textLayoutFor(element, fonts.get(element.fontWeight), view);
+}
+
+/**
+ * 文字を 1 つずつ置く。位置は書き出し側とまったく同じ計算
+ * (`textLayoutFor`) から来るので、プレビューと出力が一致する。
+ */
+function GlyphRun({
+  layout,
+  originX,
+  originY,
+  element,
+}: {
+  layout: ReturnType<typeof textLayoutOf>;
+  originX: number;
+  originY: number;
+  element: Extract<EditorElement, { type: "text" | "callout" }>;
+}) {
+  const italic = element.type === "text" && element.italic;
+
+  return (
+    <text
+      fontFamily={FONT_FAMILIES[element.fontWeight]}
+      fontSize={element.fontSize}
+      fill={element.color}
+      opacity={element.opacity}
+      xmlSpace="preserve"
+      style={{ whiteSpace: "pre" }}
+      pointerEvents="none"
+    >
+      {layout.lines.flatMap((line, lineIndex) =>
+        line.glyphs.map((glyph, glyphIndex) => {
+          const x = originX + glyph.x;
+          const y = originY + glyph.y;
+          // 縦書きで倒す文字と疑似イタリックは、その文字だけ変形させる。
+          const transforms = [
+            glyph.rotated ? `rotate(90 ${x} ${y})` : "",
+            italic ? `skewX(${-ITALIC_SKEW_DEGREES})` : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+
+          return (
+            <tspan
+              key={`${lineIndex}-${glyphIndex}`}
+              x={x}
+              y={y}
+              transform={transforms || undefined}
+            >
+              {glyph.char}
+            </tspan>
+          );
+        }),
+      )}
+    </text>
   );
 }
 
@@ -106,46 +163,60 @@ function renderBody(
   switch (element.type) {
     case "text": {
       if (isEditing) return null;
-      const font = fonts.get(element.fontWeight);
       const layout = textLayoutOf(element, view, fonts);
-      const left = element.x * view.width;
-      const top = element.y * view.height;
+      return (
+        <GlyphRun
+          layout={layout}
+          originX={element.x * view.width}
+          originY={element.y * view.height}
+          element={element}
+        />
+      );
+    }
+
+    case "callout": {
+      const layout = textLayoutOf(element, view, fonts);
+      const rect = {
+        x: element.x,
+        y: element.y,
+        w: element.w,
+        h: element.h,
+      };
+      const anchor = calloutAnchor(rect, {
+        x: element.targetX,
+        y: element.targetY,
+      });
 
       return (
-        <text
-          fontFamily={FONT_FAMILIES[element.fontWeight]}
-          fontSize={element.fontSize}
-          fill={element.color}
-          opacity={element.opacity}
-          xmlSpace="preserve"
-          style={{
-            whiteSpace: "pre",
-            // 書き出し側の xSkew と見え方を合わせた疑似イタリック。
-            ...(element.italic
-              ? { transform: `skewX(${-ITALIC_SKEW_DEGREES}deg)`, transformBox: "fill-box" }
-              : {}),
-          }}
-          pointerEvents="none"
-        >
-          {layout.lines.map((line, index) => {
-            const lineWidth = font.measureText(line, element.fontSize);
-            const offset =
-              element.align === "center"
-                ? (layout.width - lineWidth) / 2
-                : element.align === "right"
-                  ? layout.width - lineWidth
-                  : 0;
-            return (
-              <tspan
-                key={index}
-                x={left + offset}
-                y={top + layout.baselineOffsets[index]}
-              >
-                {line}
-              </tspan>
-            );
-          })}
-        </text>
+        <g opacity={element.opacity} pointerEvents="none">
+          <line
+            x1={anchor.x * view.width}
+            y1={anchor.y * view.height}
+            x2={element.targetX * view.width}
+            y2={element.targetY * view.height}
+            stroke={element.stroke ?? element.color}
+            strokeWidth={Math.max(0.5, element.strokeWidth)}
+            strokeLinecap="round"
+          />
+          <rect
+            x={element.x * view.width}
+            y={element.y * view.height}
+            width={element.w * view.width}
+            height={element.h * view.height}
+            rx={element.radius}
+            fill={element.fill ?? "none"}
+            stroke={element.stroke ?? "none"}
+            strokeWidth={element.strokeWidth}
+          />
+          {!isEditing && (
+            <GlyphRun
+              layout={layout}
+              originX={element.x * view.width + CALLOUT_PADDING}
+              originY={element.y * view.height + CALLOUT_PADDING}
+              element={element}
+            />
+          )}
+        </g>
       );
     }
 

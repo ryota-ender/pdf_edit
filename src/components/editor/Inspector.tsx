@@ -6,6 +6,8 @@ import {
   sanitizeText,
 } from "@/lib/pdf/textLayout";
 import { clamp } from "@/lib/pdf/coordinates";
+import type { Unit } from "@/lib/pdf/units";
+import { formatLength, parseLength, UNIT_LABELS } from "@/lib/pdf/units";
 import { ELEMENT_LABELS } from "@/lib/pdf/elementDefaults";
 import type { AlignMode } from "@/lib/pdf/geometry";
 import type { SavedStamp } from "@/lib/pdf/stamps";
@@ -21,14 +23,23 @@ import {
   LockIcon,
   RotateIcon,
   SendBackwardIcon,
+  CropIcon,
+  PipetteIcon,
+  PlusPageIcon,
   StampIcon,
   TrashIcon,
   UngroupIcon,
   UnlockIcon,
   WrapIcon,
 } from "./Icons";
-import type { EditorElement, PageState, TextElement } from "@/types/editor";
-import { isBoxElement, isShapeElement } from "@/types/editor";
+import type {
+  CalloutElement,
+  EditorElement,
+  PageSize,
+  PageState,
+  TextElement,
+} from "@/types/editor";
+import { PAPER_SIZES, isBoxElement, isShapeElement } from "@/types/editor";
 
 const TEXT_COLORS = [
   "#111827",
@@ -54,6 +65,13 @@ interface InspectorProps {
   pageIndex: number;
   pageCount: number;
   stamps: SavedStamp[];
+  /** 位置とサイズの表示単位。 */
+  unit: Unit;
+  onUnitChange: (unit: Unit) => void;
+  /** 表示中のページの寸法（PDFポイント）。単位換算に使う。 */
+  pageSize: PageSize;
+  /** 直近に使った色。 */
+  recentColors: string[];
   onPreview: (patch: Partial<EditorElement>) => void;
   onCommit: (patch: Partial<EditorElement>) => void;
   onBeginTransaction: () => void;
@@ -72,6 +90,10 @@ interface InspectorProps {
   onRotatePage: () => void;
   onDeletePage: () => void;
   onExtractPage: () => void;
+  onInsertBlankPage: () => void;
+  onCropPage: () => void;
+  onClearCrop: () => void;
+  onResizePage: (size: PageSize | null) => void;
 }
 
 /** 右側のプロパティ欄。選択している要素の種類に応じて中身が変わる。 */
@@ -81,6 +103,10 @@ export function Inspector({
   pageIndex,
   pageCount,
   stamps,
+  unit,
+  onUnitChange,
+  pageSize,
+  recentColors,
   onPreview,
   onCommit,
   onBeginTransaction,
@@ -99,6 +125,10 @@ export function Inspector({
   onRotatePage,
   onDeletePage,
   onExtractPage,
+  onInsertBlankPage,
+  onCropPage,
+  onClearCrop,
+  onResizePage,
 }: InspectorProps) {
   const single = selected.length === 1 ? selected[0] : null;
   const isLocked = selected.length > 0 && selected.every((item) => item.locked);
@@ -164,6 +194,18 @@ export function Inspector({
         {single?.type === "text" && (
           <TextSection
             element={single}
+            recent={recentColors}
+            onPreview={onPreview}
+            onCommit={onCommit}
+            onBeginTransaction={onBeginTransaction}
+            onEndTransaction={onEndTransaction}
+          />
+        )}
+
+        {single?.type === "callout" && (
+          <CalloutSection
+            element={single}
+            recent={recentColors}
             onPreview={onPreview}
             onCommit={onCommit}
             onBeginTransaction={onBeginTransaction}
@@ -174,6 +216,7 @@ export function Inspector({
         {single && isShapeElement(single) && (
           <ShapeSection
             element={single}
+            recent={recentColors}
             onPreview={onPreview}
             onCommit={onCommit}
             onBeginTransaction={onBeginTransaction}
@@ -187,6 +230,7 @@ export function Inspector({
               colors={HIGHLIGHT_COLORS}
               value={single.color}
               onPick={(color) => onCommit({ color })}
+              recent={recentColors}
             />
           </Field>
         )}
@@ -194,6 +238,7 @@ export function Inspector({
         {(single?.type === "arrow" || single?.type === "pen") && (
           <StrokeSection
             element={single}
+            recent={recentColors}
             onPreview={onPreview}
             onCommit={onCommit}
             onBeginTransaction={onBeginTransaction}
@@ -249,41 +294,69 @@ export function Inspector({
               </div>
             </Field>
 
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="X (%)" htmlFor="prop-x">
-                <PercentInput
-                  id="prop-x"
-                  value={"x" in single ? single.x : 0}
-                  onCommit={(x) => onCommit({ x })}
-                  disabled={!("x" in single)}
-                />
-              </Field>
-              <Field label="Y (%)" htmlFor="prop-y">
-                <PercentInput
-                  id="prop-y"
-                  value={"y" in single ? single.y : 0}
-                  onCommit={(y) => onCommit({ y })}
-                  disabled={!("y" in single)}
-                />
-              </Field>
-              {isBoxElement(single) && (
-                <>
-                  <Field label="幅 (%)" htmlFor="prop-w">
-                    <PercentInput
-                      id="prop-w"
-                      value={single.w}
-                      onCommit={(w) => onCommit({ w })}
-                    />
-                  </Field>
-                  <Field label="高さ (%)" htmlFor="prop-h">
-                    <PercentInput
-                      id="prop-h"
-                      value={single.h}
-                      onCommit={(h) => onCommit({ h })}
-                    />
-                  </Field>
-                </>
-              )}
+            <div>
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-xs font-medium text-slate-600">
+                  位置とサイズ
+                </span>
+                <select
+                  value={unit}
+                  onChange={(event) => onUnitChange(event.target.value as Unit)}
+                  aria-label="単位"
+                  className="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] text-slate-600"
+                >
+                  {Object.entries(UNIT_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="X" htmlFor="prop-x">
+                  <LengthInput
+                    id="prop-x"
+                    value={"x" in single ? single.x : 0}
+                    total={pageSize.width}
+                    unit={unit}
+                    onCommit={(x) => onCommit({ x })}
+                    disabled={!("x" in single)}
+                  />
+                </Field>
+                <Field label="Y" htmlFor="prop-y">
+                  <LengthInput
+                    id="prop-y"
+                    value={"y" in single ? single.y : 0}
+                    total={pageSize.height}
+                    unit={unit}
+                    onCommit={(y) => onCommit({ y })}
+                    disabled={!("y" in single)}
+                  />
+                </Field>
+                {isBoxElement(single) && (
+                  <>
+                    <Field label="幅" htmlFor="prop-w">
+                      <LengthInput
+                        id="prop-w"
+                        value={single.w}
+                        total={pageSize.width}
+                        unit={unit}
+                        onCommit={(w) => onCommit({ w })}
+                      />
+                    </Field>
+                    <Field label="高さ" htmlFor="prop-h">
+                      <LengthInput
+                        id="prop-h"
+                        value={single.h}
+                        total={pageSize.height}
+                        unit={unit}
+                        onCommit={(h) => onCommit({ h })}
+                      />
+                    </Field>
+                  </>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -337,6 +410,18 @@ export function Inspector({
                 ページ抽出
               </SmallButton>
               <SmallButton
+                onClick={onInsertBlankPage}
+                icon={<PlusPageIcon className="h-3.5 w-3.5" />}
+              >
+                白紙を挿入
+              </SmallButton>
+              <SmallButton
+                onClick={page.crop ? onClearCrop : onCropPage}
+                icon={<CropIcon className="h-3.5 w-3.5" />}
+              >
+                {page.crop ? "切り抜き解除" : "選択範囲で切抜"}
+              </SmallButton>
+              <SmallButton
                 onClick={onDeletePage}
                 disabled={pageCount <= 1}
                 danger
@@ -345,6 +430,39 @@ export function Inspector({
                 ページ削除
               </SmallButton>
             </div>
+
+            <label className="mt-3 block">
+              <span className="mb-1 block text-xs font-medium text-slate-600">
+                用紙サイズ
+              </span>
+              <select
+                aria-label="用紙サイズ"
+                value={
+                  page.resizeTo
+                    ? `${page.resizeTo.width}x${page.resizeTo.height}`
+                    : ""
+                }
+                onChange={(event) => {
+                  const found = PAPER_SIZES.find(
+                    (paper) =>
+                      `${paper.size.width}x${paper.size.height}` ===
+                      event.target.value,
+                  );
+                  onResizePage(found ? found.size : null);
+                }}
+                className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-700 focus-visible:border-blue-500 focus-visible:outline-none"
+              >
+                <option value="">元のまま</option>
+                {PAPER_SIZES.map((paper) => (
+                  <option
+                    key={paper.label}
+                    value={`${paper.size.width}x${paper.size.height}`}
+                  >
+                    {paper.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </section>
         )}
       </div>
@@ -490,6 +608,7 @@ function AlignGlyph({ mode }: { mode: AlignMode }) {
 
 interface SectionProps<T extends EditorElement> {
   element: T;
+  recent: string[];
   onPreview: (patch: Partial<EditorElement>) => void;
   onCommit: (patch: Partial<EditorElement>) => void;
   onBeginTransaction: () => void;
@@ -498,6 +617,7 @@ interface SectionProps<T extends EditorElement> {
 
 function TextSection({
   element,
+  recent,
   onPreview,
   onCommit,
   onBeginTransaction,
@@ -598,6 +718,28 @@ function TextSection({
         </div>
       </Field>
 
+      <Field label="日本語組版">
+        <div className="flex items-center gap-1">
+          <ToggleButton
+            label="縦書き"
+            active={element.vertical}
+            onClick={() => onCommit({ vertical: !element.vertical })}
+          >
+            <span className="text-[11px] font-semibold">縦</span>
+          </ToggleButton>
+          <ToggleButton
+            label="ぶら下げ組"
+            active={element.hanging}
+            onClick={() => onCommit({ hanging: !element.hanging })}
+          >
+            <span className="text-[11px] font-semibold">ぶ</span>
+          </ToggleButton>
+          <span className="ml-1 text-[11px] text-slate-400">
+            句読点は自動で詰まります
+          </span>
+        </div>
+      </Field>
+
       <Field label="折り返し">
         <div className="flex items-center gap-2">
           <ToggleButton
@@ -635,6 +777,7 @@ function TextSection({
           colors={TEXT_COLORS}
           value={element.color}
           onPick={(color) => onCommit({ color })}
+          recent={recent}
           allowCustom
           onCustomBegin={onBeginTransaction}
           onCustomChange={(color) => onPreview({ color })}
@@ -645,8 +788,92 @@ function TextSection({
   );
 }
 
+function CalloutSection({
+  element,
+  recent,
+  onPreview,
+  onCommit,
+  onBeginTransaction,
+  onEndTransaction,
+}: SectionProps<CalloutElement>) {
+  return (
+    <>
+      <Field label="テキスト" htmlFor="prop-text">
+        <textarea
+          id="prop-text"
+          value={element.text}
+          rows={3}
+          spellCheck={false}
+          onFocus={onBeginTransaction}
+          onChange={(event) =>
+            onPreview({ text: sanitizeText(event.target.value) })
+          }
+          onBlur={onEndTransaction}
+          className="w-full resize-y rounded-lg border border-slate-300 px-2.5 py-2 text-sm text-slate-800 focus-visible:border-blue-500 focus-visible:outline-none"
+        />
+      </Field>
+
+      <Field label={`フォントサイズ (${Math.round(element.fontSize)}pt)`}>
+        <input
+          type="range"
+          min={MIN_FONT_SIZE}
+          max={72}
+          step={1}
+          value={Math.round(element.fontSize)}
+          onPointerDown={onBeginTransaction}
+          onChange={(event) =>
+            onPreview({ fontSize: Number(event.target.value) })
+          }
+          onPointerUp={onEndTransaction}
+          aria-label="フォントサイズ"
+          className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-blue-600"
+        />
+      </Field>
+
+      <Field label="文字色">
+        <Swatches
+          colors={TEXT_COLORS}
+          value={element.color}
+          onPick={(color) => onCommit({ color })}
+          recent={recent}
+        />
+      </Field>
+
+      <Field label="枠と線の色">
+        <Swatches
+          colors={TEXT_COLORS}
+          value={element.stroke}
+          onPick={(color) => onCommit({ stroke: color })}
+          recent={recent}
+          allowNone
+          onPickNone={() => onCommit({ stroke: null })}
+        />
+      </Field>
+
+      <Field label="枠の塗り">
+        <Swatches
+          colors={TEXT_COLORS}
+          value={element.fill}
+          onPick={(color) => onCommit({ fill: color })}
+          recent={recent}
+          allowNone
+          onPickNone={() => onCommit({ fill: null })}
+        />
+      </Field>
+
+      <StrokeWidthField
+        value={element.strokeWidth}
+        onPreview={(strokeWidth) => onPreview({ strokeWidth })}
+        onBeginTransaction={onBeginTransaction}
+        onEndTransaction={onEndTransaction}
+      />
+    </>
+  );
+}
+
 function ShapeSection({
   element,
+  recent,
   onPreview,
   onCommit,
   onBeginTransaction,
@@ -659,6 +886,7 @@ function ShapeSection({
           colors={TEXT_COLORS}
           value={element.stroke}
           onPick={(color) => onCommit({ stroke: color })}
+          recent={recent}
           allowNone
           onPickNone={() => onCommit({ stroke: null })}
           allowCustom
@@ -673,6 +901,7 @@ function ShapeSection({
           colors={TEXT_COLORS}
           value={element.fill}
           onPick={(color) => onCommit({ fill: color })}
+          recent={recent}
           allowNone
           onPickNone={() => onCommit({ fill: null })}
           allowCustom
@@ -713,6 +942,7 @@ function ShapeSection({
 
 function StrokeSection({
   element,
+  recent,
   onPreview,
   onCommit,
   onBeginTransaction,
@@ -725,6 +955,7 @@ function StrokeSection({
           colors={TEXT_COLORS}
           value={element.color}
           onPick={(color) => onCommit({ color })}
+          recent={recent}
           allowCustom
           onCustomBegin={onBeginTransaction}
           onCustomChange={(color) => onPreview({ color })}
@@ -803,6 +1034,8 @@ interface SwatchesProps {
   onCustomBegin?: () => void;
   onCustomChange?: (color: string) => void;
   onCustomEnd?: () => void;
+  /** 直近に使った色。 */
+  recent?: string[];
 }
 
 function Swatches({
@@ -815,9 +1048,39 @@ function Swatches({
   onCustomBegin,
   onCustomChange,
   onCustomEnd,
+  recent = [],
 }: SwatchesProps) {
+  // ページ上の色をそのまま拾える環境ではスポイトを出す。
+  const canPickFromScreen =
+    typeof window !== "undefined" && "EyeDropper" in window;
+
+  const pickFromScreen = async () => {
+    try {
+      const Picker = (
+        window as unknown as {
+          EyeDropper: new () => { open(): Promise<{ sRGBHex: string }> };
+        }
+      ).EyeDropper;
+      const result = await new Picker().open();
+      onPick(result.sRGBHex);
+    } catch {
+      // 取り消しただけなので何もしない。
+    }
+  };
+
   return (
     <div className="flex flex-wrap items-center gap-1">
+      {canPickFromScreen && (
+        <button
+          type="button"
+          onClick={() => void pickFromScreen()}
+          title="画面から色を拾う"
+          aria-label="画面から色を拾う"
+          className="grid h-7 w-7 shrink-0 place-items-center rounded border border-slate-300 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
+        >
+          <PipetteIcon className="h-4 w-4" />
+        </button>
+      )}
       {allowCustom && (
         <input
           type="color"
@@ -861,18 +1124,44 @@ function Swatches({
           style={{ backgroundColor: color }}
         />
       ))}
+
+      {recent.length > 0 && (
+        <>
+          <span className="mx-0.5 h-5 w-px bg-slate-200" aria-hidden="true" />
+          {recent.slice(0, 5).map((color) => (
+            <button
+              key={`recent-${color}`}
+              type="button"
+              onClick={() => onPick(color)}
+              title={`最近使った色 ${color}`}
+              aria-label={`最近使った色 ${color} にする`}
+              className="h-6 w-6 rounded border border-slate-300 transition-transform hover:scale-110"
+              style={{ backgroundColor: color }}
+            />
+          ))}
+        </>
+      )}
     </div>
   );
 }
 
-function PercentInput({
+/**
+ * 正規化された値を、選んだ単位で見せる入力欄。
+ * 内部の持ち方は比率のまま変えない。
+ */
+function LengthInput({
   id,
   value,
+  total,
+  unit,
   onCommit,
   disabled,
 }: {
   id: string;
   value: number;
+  /** ページの該当方向の長さ（PDFポイント）。 */
+  total: number;
+  unit: Unit;
   onCommit: (value: number) => void;
   disabled?: boolean;
 }) {
@@ -880,13 +1169,13 @@ function PercentInput({
     <input
       id={id}
       type="number"
-      min={0}
-      max={100}
-      step={0.1}
+      step={unit === "percent" ? 0.1 : unit === "mm" ? 0.5 : 1}
       disabled={disabled}
-      value={Number((value * 100).toFixed(1))}
+      value={formatLength(value, total, unit)}
       onChange={(event) =>
-        onCommit(clamp(Number(event.target.value) / 100 || 0, 0, 1))
+        onCommit(
+          clamp(parseLength(Number(event.target.value), total, unit), -1, 2),
+        )
       }
       className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm tabular-nums text-slate-800 focus-visible:border-blue-500 focus-visible:outline-none disabled:bg-slate-50 disabled:text-slate-400"
     />

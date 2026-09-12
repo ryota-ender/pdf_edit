@@ -13,7 +13,8 @@ import type { LoadedSource } from "@/hooks/usePdfDocument";
 import type { PageState } from "@/types/editor";
 
 export interface PageViewInfo {
-  source: LoadedSource;
+  /** 白紙ページでは null。 */
+  source: LoadedSource | null;
   rotation: number;
   width: number;
   height: number;
@@ -118,12 +119,23 @@ export function PageRail({
                 }`}
               >
                 <span className="sr-only">{index + 1}ページ目を表示</span>
-                {view && (
+                {view?.source ? (
                   <PageThumbnail
                     doc={view.source.doc}
                     sourceIndex={page.sourceIndex}
                     size={view.source.sizes[page.sourceIndex]}
                     rotation={view.rotation}
+                  />
+                ) : (
+                  // 白紙ページ。縦横比だけ合わせた白い矩形を出す。
+                  <div
+                    className="bg-white"
+                    style={{
+                      width: 132,
+                      height: view
+                        ? Math.round((132 * view.height) / view.width)
+                        : 186,
+                    }}
                   />
                 )}
               </button>

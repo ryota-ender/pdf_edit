@@ -276,3 +276,86 @@ export const CloseIcon = (props: IconProps) => (
     <path d="m6 6 12 12M18 6 6 18" />
   </Icon>
 );
+
+export const EyeIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z" />
+    <circle cx={12} cy={12} r={2.5} />
+  </Icon>
+);
+
+export const EyeOffIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 4l16 16M9.9 5.2A9.6 9.6 0 0 1 12 5c6.5 0 10 6 10 6a17 17 0 0 1-3.3 3.8M6.3 7.9A17 17 0 0 0 2 11s3.5 6 10 6a9.9 9.9 0 0 0 3.6-.7" />
+  </Icon>
+);
+
+export const CommentIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.5A8 8 0 0 1 11 4h2a8 8 0 0 1 8 8z" />
+  </Icon>
+);
+
+export const LayersIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m12 3 9 5-9 5-9-5zM3 13l9 5 9-5M3 17l9 5 9-5" />
+  </Icon>
+);
+
+export const SlidersIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M8 15v4" />
+  </Icon>
+);
+
+export const FormIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x={3} y={4} width={18} height={16} rx={2} />
+    <path d="M7 9h10M7 13h6M7 17h3" />
+  </Icon>
+);
+
+export const ScanIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M3 12h18" />
+  </Icon>
+);
+
+export const CertificateIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <circle cx={12} cy={9} r={5} />
+    <path d="m8.5 13.5-1 7.5 4.5-2.5 4.5 2.5-1-7.5" />
+  </Icon>
+);
+
+export const PrintIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M6 9V4h12v5M6 18H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1" />
+    <rect x={7} y={14} width={10} height={7} rx={1} />
+  </Icon>
+);
+
+export const PlusPageIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5M12 12v5M9.5 14.5h5" />
+  </Icon>
+);
+
+export const CropIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14" />
+  </Icon>
+);
+
+export const PipetteIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m14 5 5 5M13 6 5.5 13.5 4 20l6.5-1.5L18 11M16.5 3.5a2.1 2.1 0 0 1 3 3L18 8l-3-3z" />
+  </Icon>
+);
+
+export const CheckIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m5 12.5 4.5 4.5L19 7" />
+  </Icon>
+);

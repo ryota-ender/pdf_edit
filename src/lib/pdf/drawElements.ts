@@ -2,11 +2,12 @@ import {
   LineCapStyle,
   LineJoinStyle,
   appendBezierCurve,
+  beginText,
   closePath,
   concatTransformationMatrix,
   degrees,
   drawObject,
-  drawLinesOfText,
+  endText,
   fill,
   fillAndStroke,
   lineTo,
@@ -18,13 +19,18 @@ import {
   setGraphicsState,
   setLineCap,
   setLineJoin,
+  setFontAndSize,
   setLineWidth,
   setStrokingColor,
+  showText,
+  rotateAndSkewTextRadiansAndTranslate,
   stroke,
+  toRadians,
 } from "pdf-lib";
 import type { PDFFont, PDFName, PDFOperator } from "pdf-lib";
 import { hexToRgb01, viewPointToPdfPoint } from "./coordinates";
-import { LINE_HEIGHT_FACTOR, layoutTextBlock } from "./textLayout";
+import { CALLOUT_PADDING, textLayoutFor } from "./textLayout";
+import type { GlyphPosition } from "./textLayout";
 import { ITALIC_SKEW_DEGREES } from "./font";
 import { rectCenter, rotatePoint } from "./geometry";
 import type { FontBook } from "./font";
@@ -346,6 +352,10 @@ export function buildElementOperators(
     return buildImageOperators(element, resources);
   }
 
+  if (element.type === "callout") {
+    return buildCalloutOperators(element, resources);
+  }
+
   const rect = elementGeometryRect(element);
   const center = rectCenter(rect);
   const rotation = element.rotation;
@@ -495,18 +505,8 @@ function buildTextOperators(
   resources: DrawResources,
 ): PDFOperator[] {
   const { geo } = resources;
-  const { font, name } = resources.font(element.fontWeight);
   const metrics = resources.fonts.get(element.fontWeight);
-
-  const layout = layoutTextBlock(
-    element.text,
-    element.fontSize,
-    metrics,
-    element.width === null ? null : element.width * geo.view.width,
-  );
-
-  const { r, g, b } = hexToRgb01(element.color);
-  const gs = resources.graphicsState({ opacity: element.opacity });
+  const layout = textLayoutFor(element, metrics, geo.view);
 
   const rect: NormalizedRect = {
     x: element.x,
@@ -514,51 +514,210 @@ function buildTextOperators(
     w: layout.width / geo.view.width,
     h: layout.height / geo.view.height,
   };
+
+  return buildGlyphOperators(
+    layout.lines.flatMap((line) => line.glyphs),
+    {
+      origin: { x: element.x, y: element.y },
+      rect,
+      rotation: element.rotation,
+      fontSize: element.fontSize,
+      color: element.color,
+      opacity: element.opacity,
+      weight: element.fontWeight,
+      italic: element.italic,
+    },
+    resources,
+  );
+}
+
+/**
+ * 文字ごとに位置を指定して描く。
+ *
+ * 縦書きも文字詰めも「1 文字ずつ好きな場所へ置く」ことで表現している。
+ * プレビュー (SVG) 側も同じ座標を使うので、両者は必ず一致する。
+ */
+function buildGlyphOperators(
+  glyphs: GlyphPosition[],
+  style: {
+    /** テキストブロック左上の正規化座標。 */
+    origin: Point;
+    /** 回転の軸になる矩形。 */
+    rect: NormalizedRect;
+    rotation: number;
+    fontSize: number;
+    color: string;
+    opacity: number;
+    weight: FontWeight;
+    italic: boolean;
+  },
+  resources: DrawResources,
+): PDFOperator[] {
+  if (glyphs.length === 0) return [];
+
+  const { geo } = resources;
+  const { font, name } = resources.font(style.weight);
+  const { r, g, b } = hexToRgb01(style.color);
+  const gs = resources.graphicsState({ opacity: style.opacity });
+  const center = rectCenter(style.rect);
+
+  const operators: PDFOperator[] = [pushGraphicsState()];
+  if (gs) operators.push(setGraphicsState(gs));
+  operators.push(beginText(), setFillingColor(rgb(r, g, b)), setFontAndSize(name, style.fontSize));
+
+  for (const glyph of glyphs) {
+    // グリフの基準点を正規化座標へ直し、要素の回転を適用してから PDF 座標へ。
+    const normalized: Point = {
+      x: style.origin.x + glyph.x / geo.view.width,
+      y: style.origin.y + glyph.y / geo.view.height,
+    };
+    const rotated =
+      style.rotation === 0
+        ? normalized
+        : rotatePoint(normalized, center, style.rotation, geo.view);
+    const point = normalizedToPdf(geo, rotated.x, rotated.y);
+
+    // 縦書きで倒す文字は、その文字だけ 90 度回して置く。
+    const glyphRotation =
+      geo.rotation - style.rotation - (glyph.rotated ? 90 : 0);
+
+    operators.push(
+      rotateAndSkewTextRadiansAndTranslate(
+        toRadians(degrees(glyphRotation)),
+        toRadians(degrees(style.italic ? ITALIC_SKEW_DEGREES : 0)),
+        toRadians(degrees(0)),
+        point.x,
+        point.y,
+      ),
+      showText(font.encodeText(glyph.char)),
+    );
+  }
+
+  operators.push(endText(), popGraphicsState());
+  return operators;
+}
+
+/** 吹き出し: 引き出し線・枠・文字をまとめて描く。 */
+function buildCalloutOperators(
+  element: Extract<EditorElement, { type: "callout" }>,
+  resources: DrawResources,
+): PDFOperator[] {
+  const { geo } = resources;
+  const rect: NormalizedRect = {
+    x: element.x,
+    y: element.y,
+    w: element.w,
+    h: element.h,
+  };
   const center = rectCenter(rect);
 
   const operators: PDFOperator[] = [];
 
-  layout.lines.forEach((line, index) => {
-    if (line.length === 0) return;
-
-    // 行揃えは行ごとに開始位置をずらして表現する。
-    const lineWidth = metrics.measureText(line, element.fontSize);
-    const offset =
-      element.align === "center"
-        ? (layout.width - lineWidth) / 2
-        : element.align === "right"
-          ? layout.width - lineWidth
-          : 0;
-
-    const baselineNormalized: Point = {
-      x: element.x + offset / geo.view.width,
-      y: element.y + layout.baselineOffsets[index] / geo.view.height,
-    };
-    const rotated =
-      element.rotation === 0
-        ? baselineNormalized
-        : rotatePoint(baselineNormalized, center, element.rotation, geo.view);
-    const origin = normalizedToPdf(geo, rotated.x, rotated.y);
-
-    operators.push(
-      ...drawLinesOfText([font.encodeText(line)], {
-        color: rgb(r, g, b),
-        font: name,
-        size: element.fontSize,
-        // ページの /Rotate は時計回り、pdf-lib の rotate は反時計回りで
-        // 打ち消し合う。要素自身の回転は画面上の時計回りなので符号を反転する。
-        rotate: degrees(geo.rotation - element.rotation),
-        xSkew: degrees(element.italic ? ITALIC_SKEW_DEGREES : 0),
-        ySkew: degrees(0),
-        x: origin.x,
-        y: origin.y,
-        lineHeight: LINE_HEIGHT_FACTOR * element.fontSize,
-        graphicsState: gs,
-      }),
-    );
+  // --- 引き出し線 ---------------------------------------------------
+  // 枠の縁のうち、指し先にいちばん近い点から線を引く。
+  const anchor = calloutAnchor(rect, {
+    x: element.targetX,
+    y: element.targetY,
+  });
+  const strokeColor = element.stroke ?? element.color;
+  const { r: sr, g: sg, b: sb } = hexToRgb01(strokeColor);
+  const gsLine = resources.graphicsState({
+    borderOpacity: element.opacity,
   });
 
+  const mapPoint = (point: Point) => {
+    const moved =
+      element.rotation === 0
+        ? point
+        : rotatePoint(point, center, element.rotation, geo.view);
+    return normalizedToPdf(geo, moved.x, moved.y);
+  };
+
+  const from = mapPoint(anchor);
+  const to = mapPoint({ x: element.targetX, y: element.targetY });
+
+  operators.push(pushGraphicsState());
+  if (gsLine) operators.push(setGraphicsState(gsLine));
+  operators.push(
+    setStrokingColor(rgb(sr, sg, sb)),
+    setLineWidth(Math.max(0.5, element.strokeWidth)),
+    setLineCap(LineCapStyle.Round),
+    moveTo(from.x, from.y),
+    lineTo(to.x, to.y),
+    stroke(),
+    popGraphicsState(),
+  );
+
+  // --- 枠 -----------------------------------------------------------
+  const boxSegments = roundedRectPath(rect, element.radius, geo.view);
+  const hasFill = Boolean(element.fill);
+  const hasStroke = Boolean(element.stroke) && element.strokeWidth > 0;
+
+  if (hasFill || hasStroke) {
+    const gsBox = resources.graphicsState({
+      opacity: hasFill ? element.opacity : undefined,
+      borderOpacity: hasStroke ? element.opacity : undefined,
+    });
+    operators.push(pushGraphicsState());
+    if (gsBox) operators.push(setGraphicsState(gsBox));
+    if (hasFill) {
+      const fill = hexToRgb01(element.fill as string);
+      operators.push(setFillingColor(rgb(fill.r, fill.g, fill.b)));
+    }
+    if (hasStroke) {
+      const line = hexToRgb01(element.stroke as string);
+      operators.push(
+        setStrokingColor(rgb(line.r, line.g, line.b)),
+        setLineWidth(element.strokeWidth),
+        setLineJoin(LineJoinStyle.Round),
+      );
+    }
+    operators.push(
+      ...pathToOperators(boxSegments, geo, element.rotation, center),
+      hasFill && hasStroke ? fillAndStroke() : hasFill ? fill() : stroke(),
+      popGraphicsState(),
+    );
+  }
+
+  // --- 文字 ---------------------------------------------------------
+  const metrics = resources.fonts.get(element.fontWeight);
+  const layout = textLayoutFor(element, metrics, geo.view);
+  operators.push(
+    ...buildGlyphOperators(
+      layout.lines.flatMap((line) => line.glyphs),
+      {
+        origin: {
+          x: element.x + CALLOUT_PADDING / geo.view.width,
+          y: element.y + CALLOUT_PADDING / geo.view.height,
+        },
+        rect,
+        rotation: element.rotation,
+        fontSize: element.fontSize,
+        color: element.color,
+        opacity: element.opacity,
+        weight: element.fontWeight,
+        italic: false,
+      },
+      resources,
+    ),
+  );
+
   return operators;
+}
+
+/** 吹き出しの枠のうち、指し先に最も近い縁の点を返す。 */
+export function calloutAnchor(rect: NormalizedRect, target: Point): Point {
+  const center = rectCenter(rect);
+  // 枠の内側に指し先がある場合は中心から引く。
+  const clampedX = Math.max(rect.x, Math.min(target.x, rect.x + rect.w));
+  const clampedY = Math.max(rect.y, Math.min(target.y, rect.y + rect.h));
+
+  if (clampedX === target.x && clampedY === target.y) return center;
+
+  return {
+    x: target.x < rect.x ? rect.x : target.x > rect.x + rect.w ? rect.x + rect.w : clampedX,
+    y: target.y < rect.y ? rect.y : target.y > rect.y + rect.h ? rect.y + rect.h : clampedY,
+  };
 }
 
 function buildImageOperators(

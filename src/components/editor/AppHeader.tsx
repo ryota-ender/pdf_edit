@@ -6,14 +6,19 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   FolderIcon,
+  CertificateIcon,
   MergeIcon,
   MinusIcon,
   PanelIcon,
   PlusIcon,
+  PrintIcon,
   RedoIcon,
+  ScanIcon,
   SearchIcon,
   UndoIcon,
 } from "./Icons";
+import type { SessionSummary } from "@/lib/pdf/persistence";
+import { describeSession } from "@/lib/pdf/persistence";
 import type { ExportMode } from "@/lib/pdf/exportPdf";
 
 export const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
@@ -32,6 +37,12 @@ interface AppHeaderProps {
   onToggleSearch: () => void;
   /** 自動保存の状態表示。 */
   saveState: "idle" | "saving" | "saved";
+  onPrint: () => void;
+  onOpenOcr: () => void;
+  onOpenSignature: () => void;
+  /** 最近開いた文書。切り替えられるようにする。 */
+  recentDocuments: SessionSummary[];
+  onOpenRecent: (id: string) => void;
 
   showPagePanel: boolean;
   onTogglePagePanel: () => void;
@@ -63,6 +74,11 @@ export function AppHeader({
   onExportModeChange,
   onToggleSearch,
   saveState,
+  onPrint,
+  onOpenOcr,
+  onOpenSignature,
+  recentDocuments,
+  onOpenRecent,
   showPagePanel,
   onTogglePagePanel,
   canUndo,
@@ -158,6 +174,15 @@ export function AppHeader({
           <IconButton label="文書内を検索 (Cmd/Ctrl+F)" onClick={onToggleSearch}>
             <SearchIcon className="h-4.5 w-4.5" />
           </IconButton>
+          <IconButton label="文字認識 (OCR)" onClick={onOpenOcr}>
+            <ScanIcon className="h-4.5 w-4.5" />
+          </IconButton>
+          <IconButton label="印刷" onClick={onPrint}>
+            <PrintIcon className="h-4.5 w-4.5" />
+          </IconButton>
+          <IconButton label="電子署名" onClick={onOpenSignature}>
+            <CertificateIcon className="h-4.5 w-4.5" />
+          </IconButton>
 
           <Divider />
 
@@ -236,14 +261,38 @@ export function AppHeader({
           </button>
         )}
 
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
-        >
-          <FolderIcon className="h-4 w-4" />
-          開く
-        </button>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+          >
+            <FolderIcon className="h-4 w-4" />
+            開く
+          </button>
+
+          {recentDocuments.length > 0 && (
+            <details className="group absolute right-0 top-full z-40 mt-1">
+              <summary className="cursor-pointer list-none rounded px-1 text-[11px] text-slate-400 hover:text-slate-700">
+                最近の文書
+              </summary>
+              <ul className="absolute right-0 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                {recentDocuments.map((session) => (
+                  <li key={session.id}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenRecent(session.id)}
+                      className="w-full truncate rounded px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
+                      title={describeSession(session)}
+                    >
+                      {describeSession(session)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
 
         <button
           type="button"

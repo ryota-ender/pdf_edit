@@ -1,4 +1,4 @@
-import { PDFName } from "pdf-lib";
+import { PDFHexString, PDFName, PDFString } from "pdf-lib";
 import type {
   PDFDocument,
   PDFObject,
@@ -23,6 +23,17 @@ import type { EditorElement, Point } from "@/types/editor";
  * 外観の中身はページへ描くときとまったく同じオペレータ列なので、
  * どちらのモードでも見た目は一致する。
  */
+
+/**
+ * PDF の「文字列」を作る。
+ *
+ * `PDFContext.obj("...")` は素の文字列を **名前 (/Name)** として書き出すため、
+ * /Contents や /T のような本文にそのまま渡すと読めないものになる。
+ * 日本語も入るので UTF-16BE の16進文字列にする。
+ */
+function pdfText(value: string): PDFHexString {
+  return PDFHexString.fromText(value);
+}
 
 /**
  * `PDFContext.obj()` が受け取れる値。pdf-lib は同等の型を公開していないので、
@@ -126,6 +137,8 @@ export function appendAnnotation(
     }),
   );
 
+  const thread = element.comment;
+
   const base: PdfDictLiteral = {
     Type: "Annot",
     Rect: [box.x0, box.y0, box.x1, box.y1],
@@ -134,15 +147,42 @@ export function appendAnnotation(
     AP: { N: appearanceRef },
     Border: [0, 0, 0],
     CA: element.opacity,
-    T: "PDF Editor",
-    M: pdfDateString(new Date()),
+    // コメントが付いていれば、それを注釈の本文と作成者にする。
+    T: pdfText(thread?.author ?? "PDF Editor"),
+    M: PDFString.of(pdfDateString(thread ? new Date(thread.createdAt) : new Date())),
+    ...(thread?.resolved ? { StateModel: "Review", State: "Completed" } : {}),
   };
 
   const specific = annotationSpecifics(element, geo);
   if (!specific) return;
 
-  const dict = doc.context.obj({ ...base, ...specific });
-  page.node.addAnnot(doc.context.register(dict));
+  const merged: PdfDictLiteral = { ...base, ...specific };
+  // コメントは種類ごとの既定文言より優先する。
+  if (thread) merged.Contents = pdfText(thread.text);
+
+  const dict = doc.context.obj(merged);
+  const annotationRef = doc.context.register(dict);
+  page.node.addAnnot(annotationRef);
+
+  // 返信は、親を指す別の注釈として並べる。Acrobat などでスレッドに見える。
+  for (const reply of thread?.replies ?? []) {
+    const replyDict = doc.context.obj({
+      Type: "Annot",
+      Subtype: "Text",
+      // 返信は本体の脇に小さく置く。
+      Rect: [box.x1, box.y0, box.x1 + 18, box.y0 + 18],
+      F: 4,
+      Contents: pdfText(reply.text),
+      T: pdfText(reply.author),
+      M: PDFString.of(pdfDateString(new Date(reply.createdAt))),
+      // /IRT = In Reply To、/RT /R = 返信であることの指定。
+      IRT: annotationRef,
+      RT: "R",
+      Name: "Comment",
+      Open: false,
+    });
+    page.node.addAnnot(doc.context.register(replyDict));
+  }
 }
 
 /** 要素の種類ごとの注釈固有エントリ。 */
@@ -165,7 +205,7 @@ function annotationSpecifics(
         Subtype: "Highlight",
         QuadPoints: corners.flatMap((point) => [point.x, point.y]),
         C: colorArray(element.color),
-        Contents: "ハイライト",
+        Contents: pdfText("ハイライト"),
       };
     }
 
@@ -175,7 +215,7 @@ function annotationSpecifics(
         C: element.stroke ? colorArray(element.stroke) : [],
         IC: element.fill ? colorArray(element.fill) : [],
         BS: { W: element.stroke ? element.strokeWidth : 0, S: "S" },
-        Contents: "四角形",
+        Contents: pdfText("四角形"),
       };
 
     case "ellipse":
@@ -184,7 +224,7 @@ function annotationSpecifics(
         C: element.stroke ? colorArray(element.stroke) : [],
         IC: element.fill ? colorArray(element.fill) : [],
         BS: { W: element.stroke ? element.strokeWidth : 0, S: "S" },
-        Contents: "円",
+        Contents: pdfText("円"),
       };
 
     case "arrow": {
@@ -197,7 +237,7 @@ function annotationSpecifics(
         C: colorArray(element.color),
         IC: element.head ? colorArray(element.color) : [],
         BS: { W: element.strokeWidth, S: "S" },
-        Contents: element.head ? "矢印" : "直線",
+        Contents: pdfText(element.head ? "矢印" : "直線"),
       };
     }
 
@@ -213,7 +253,7 @@ function annotationSpecifics(
         })],
         C: colorArray(element.color),
         BS: { W: element.strokeWidth, S: "S" },
-        Contents: "フリーハンド",
+        Contents: pdfText("フリーハンド"),
       };
     }
 
@@ -222,8 +262,10 @@ function annotationSpecifics(
         Subtype: "FreeText",
         // DA は外観を自動生成する場合の書式指定。/AP を持たせているので
         // 実際には使われないが、仕様上必須なので置いておく。
-        DA: `${colorArray(element.color).join(" ")} rg /Helv ${element.fontSize} Tf`,
-        Contents: element.text,
+        DA: PDFString.of(
+          `${colorArray(element.color).join(" ")} rg /Helv ${element.fontSize} Tf`,
+        ),
+        Contents: pdfText(element.text),
         Q: element.align === "center" ? 1 : element.align === "right" ? 2 : 0,
       };
 
@@ -231,7 +273,7 @@ function annotationSpecifics(
       return {
         Subtype: "Stamp",
         Name: "Draft",
-        Contents: "画像",
+        Contents: pdfText("画像"),
       };
 
     default:

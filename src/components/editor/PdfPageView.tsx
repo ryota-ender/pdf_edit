@@ -20,7 +20,8 @@ import type {
 } from "@/types/editor";
 
 interface PdfPageViewProps {
-  doc: PDFDocumentProxy;
+  /** 元ページを持たない白紙ページでは null。 */
+  doc: PDFDocumentProxy | null;
   pageIndex: number;
   sourceIndex: number;
   /** 元の /Rotate にエディタでの回転を加えた最終的な角度。 */
@@ -116,6 +117,12 @@ export function PdfPageView({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // 白紙ページは描くものが無い。真っ白のまま「描画済み」にする。
+    if (!doc) {
+      const frame = requestAnimationFrame(() => setHasRendered(true));
+      return () => cancelAnimationFrame(frame);
+    }
 
     if (!isVisible) {
       // 画面から遠ざかったらバッキングストアを手放す。

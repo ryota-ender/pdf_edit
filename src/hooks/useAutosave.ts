@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { saveSession } from "@/lib/pdf/persistence";
+import { TAB_ID, saveSession, sessionIdFor } from "@/lib/pdf/persistence";
 import type { StoredImage, StoredSource } from "@/lib/pdf/persistence";
 import type { ImageAssetStore } from "@/lib/pdf/imageAssets";
 import type { EditorDoc } from "@/types/editor";
@@ -13,6 +13,8 @@ interface UseAutosaveOptions {
   doc: EditorDoc;
   sources: StoredSource[];
   images: ImageAssetStore;
+  /** フォーム欄へ記入した値も一緒に保存する。 */
+  formValues: Record<string, string>;
 }
 
 /** 書き込みが多すぎないよう、変更が落ち着いてから保存する。 */
@@ -29,6 +31,7 @@ export function useAutosave({
   doc,
   sources,
   images,
+  formValues,
 }: UseAutosaveOptions): SaveState {
   const [state, setState] = useState<SaveState>("idle");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -37,7 +40,7 @@ export function useAutosave({
     if (!enabled) return;
 
     // 変更が落ち着くまで待ってから、そのときの値をまとめて書き出す。
-    const current = { doc, sources, images };
+    const current = { doc, sources, images, formValues };
 
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
@@ -59,10 +62,13 @@ export function useAutosave({
       }
 
       saveSession({
+        id: sessionIdFor(current.sources.map((source) => source.fileName)),
         savedAt: Date.now(),
         doc: current.doc,
         sources: current.sources,
         images: storedImages,
+        formValues: current.formValues,
+        ownerId: TAB_ID,
       }).then(
         () => setState("saved"),
         () => setState("idle"),
@@ -72,7 +78,7 @@ export function useAutosave({
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [enabled, doc, sources, images]);
+  }, [enabled, doc, sources, images, formValues]);
 
   return state;
 }
